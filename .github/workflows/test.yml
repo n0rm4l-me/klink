@@ -13,11 +13,11 @@ jobs:
     name: Build, vet and test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
         with:
           persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5.5.0
         with:
           go-version-file: go.mod
 

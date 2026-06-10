@@ -26,8 +26,7 @@ rules:
 {{- if .Values.gateWebhook.enabled }}
 - apiGroups: [""]
   resources: ["secrets"]
-  verbs: ["get", "create", "update"]
-  resourceNames: ["klink-webhook-tls"]
+  verbs: ["get", "list", "watch", "create", "update"]
 - apiGroups: ["admissionregistration.k8s.io"]
   resources: ["validatingwebhookconfigurations"]
   verbs: ["get", "patch"]
