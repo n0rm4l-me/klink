@@ -32,18 +32,18 @@ webhooks:
     rules:
       - apiGroups: ["apps"]
         apiVersions: ["v1"]
-        resources: ["deployments/scale", "statefulsets/scale", "deployments", "statefulsets"]
-        operations: ["UPDATE"]
+        resources: ["deployments", "deployments/scale", "statefulsets", "statefulsets/scale"]
+        operations: ["CREATE", "UPDATE"]
         scope: Namespaced
       - apiGroups: ["argoproj.io"]
         apiVersions: ["v1alpha1"]
         resources: ["rollouts"]
-        operations: ["UPDATE"]
+        operations: ["CREATE", "UPDATE"]
         scope: Namespaced
       - apiGroups: ["batch"]
         apiVersions: ["v1"]
         resources: ["cronjobs"]
-        operations: ["UPDATE"]
+        operations: ["CREATE", "UPDATE"]
         scope: Namespaced
     clientConfig:
       service:
