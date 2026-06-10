@@ -10,7 +10,7 @@ jobs:
   test:
     permissions:
       contents: read
-    name: Build and vet
+    name: Build, vet and test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,3 +26,17 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      - name: Check manifests are up to date
+        run: |
+          go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1
+          controller-gen rbac:roleName=manager-role crd paths="./..." output:crd:artifacts:config=testdata/crd
+          cp testdata/crd/*.yaml charts/klink/templates/crd.yaml
+          git diff --exit-code testdata/crd/ charts/klink/templates/crd.yaml || \
+            (echo "CRD manifests are out of date. Run 'make manifests' and commit." && exit 1)
+
+      - name: Run tests
+        run: |
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+          ENVTEST_ASSETS=$(setup-envtest use 1.33 -p path)
+          KUBEBUILDER_ASSETS=$ENVTEST_ASSETS go test ./internal/controller/... -timeout 120s

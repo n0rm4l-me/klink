@@ -64,7 +64,7 @@ var _ = BeforeSuite(func() {
 	root := filepath.Join(filepath.Dir(filename), "..", "..")
 
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join(root, "config", "crd")},
+		CRDDirectoryPaths:     []string{filepath.Join(root, "testdata", "crd")},
 		ErrorIfCRDPathMissing: true,
 		BinaryAssetsDirectory: filepath.Join(root, "bin", "k8s",
 			"1.33.0-"+runtime.GOOS+"-"+runtime.GOARCH),

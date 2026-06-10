@@ -17,8 +17,8 @@ generate: controller-gen
 
 .PHONY: manifests
 manifests: controller-gen
-	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd paths="./..." output:crd:artifacts:config=config/crd
-	cp config/crd/*.yaml charts/klink/templates/crd.yaml
+	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd paths="./..." output:crd:artifacts:config=testdata/crd
+	cp testdata/crd/*.yaml charts/klink/templates/crd.yaml
 
 .PHONY: test
 test:
