@@ -22,6 +22,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,7 +37,6 @@ import (
 	depsv1alpha1 "github.com/n0rm4l-me/klink/api/v1alpha1"
 )
 
-
 // WorkloadDependencyReconciler reconciles a WorkloadDependency object
 type WorkloadDependencyReconciler struct {
 	client.Client
@@ -47,7 +47,8 @@ type WorkloadDependencyReconciler struct {
 // +kubebuilder:rbac:groups=deps.klink.dev,resources=workloaddependencies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=deps.klink.dev,resources=workloaddependencies/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=deps.klink.dev,resources=workloaddependencies/finalizers,verbs=update
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *WorkloadDependencyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -60,7 +61,6 @@ func (r *WorkloadDependencyReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	log.Info("reconciling", "phase", wd.Status.Phase, "mode", wd.Spec.Mode)
 
-	// Paused via annotation — stop reconciling, just update status
 	if wd.Annotations[depsv1alpha1.AnnotationPaused] == "true" {
 		return r.setStatus(ctx, wd, depsv1alpha1.PhasePaused, "manually paused via klink.dev/paused annotation", nil)
 	}
@@ -70,15 +70,16 @@ func (r *WorkloadDependencyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		dependentNS = wd.Namespace
 	}
 
-	dependent := &appsv1.Deployment{}
-	if err := r.Get(ctx, types.NamespacedName{Name: wd.Spec.Dependent.Name, Namespace: dependentNS}, dependent); err != nil {
+	dependent, err := r.getWorkload(ctx, wd.Spec.Dependent.Kind, wd.Spec.Dependent.Name, dependentNS)
+	if err != nil {
 		if errors.IsNotFound(err) {
-			return r.setStatus(ctx, wd, depsv1alpha1.PhaseUnknown, fmt.Sprintf("dependent deployment %s not found", wd.Spec.Dependent.Name), nil)
+			return r.setStatus(ctx, wd, depsv1alpha1.PhaseUnknown,
+				fmt.Sprintf("dependent %s/%s not found", wd.Spec.Dependent.Kind, wd.Spec.Dependent.Name), nil)
 		}
 		return ctrl.Result{}, err
 	}
 
-	// Evaluate all dependencies: each is healthy, co-suspended (klink put it to zero), or truly broken.
+	// Evaluate all dependencies
 	allOk := true
 	var unhealthyMsg string
 
@@ -88,38 +89,33 @@ func (r *WorkloadDependencyReconciler) Reconcile(ctx context.Context, req ctrl.R
 			ns = wd.Namespace
 		}
 
-		depDeploy := &appsv1.Deployment{}
-		if err := r.Get(ctx, types.NamespacedName{Name: dep.Name, Namespace: ns}, depDeploy); err != nil {
+		depWorkload, err := r.getWorkload(ctx, dep.Kind, dep.Name, ns)
+		if err != nil {
 			if errors.IsNotFound(err) {
 				allOk = false
-				unhealthyMsg = fmt.Sprintf("dependency %s not found", dep.Name)
+				unhealthyMsg = fmt.Sprintf("dependency %s/%s not found", dep.Kind, dep.Name)
 				break
 			}
 			return ctrl.Result{}, err
 		}
 
-		status, err := r.depStatus(ctx, depDeploy, dep.Condition, ns)
-		if err != nil {
-			return ctrl.Result{}, err
+		status, statusErr := r.depStatus(ctx, depWorkload, dep.Condition, ns)
+		if statusErr != nil {
+			return ctrl.Result{}, statusErr
 		}
-		log.Info("dependency status", "dep", dep.Name, "status", status)
+		log.Info("dependency status", "dep", dep.Name, "kind", dep.Kind, "status", status)
 
 		switch status {
-		case depHealthy:
+		case depHealthy, depCoSuspended:
 			// ok
-		case depCoSuspended:
-			// klink suspended it — treat as ok for recovery purposes
 		case depUnhealthy:
 			allOk = false
-			unhealthyMsg = fmt.Sprintf("dependency %s is not healthy (%d/%d ready)",
-				dep.Name, depDeploy.Status.ReadyReplicas, depDeploy.Status.Replicas)
+			unhealthyMsg = fmt.Sprintf("dependency %s %s is not healthy", dep.Kind, dep.Name)
 		}
 	}
 
 	now := metav1.Now()
 
-	// If already Suspended and dependency still unhealthy — strict mode re-enforces directly,
-	// no need to go through window check again.
 	if !allOk && wd.Status.Phase == depsv1alpha1.PhaseSuspended {
 		return r.handleSuspended(ctx, wd, dependent, unhealthyMsg)
 	}
@@ -130,6 +126,67 @@ func (r *WorkloadDependencyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	return r.handleDegraded(ctx, wd, dependent, unhealthyMsg, now)
 }
 
+// workloadAccessor abstracts Deployment / StatefulSet / CronJob behind a common interface.
+type workloadAccessor interface {
+	client.Object
+	// getReplicas returns desired replica count. -1 for CronJob (not applicable).
+	getReplicas() int32
+	// setReplicas updates the spec replica count. No-op for CronJob.
+	setReplicas(n int32)
+	// isSuspended returns true if CronJob.spec.suspend is true. Always false for Deployment/StatefulSet.
+	isSuspended() bool
+	// setSuspend sets CronJob.spec.suspend. No-op for Deployment/StatefulSet.
+	setSuspend(v bool)
+}
+
+type deploymentAccessor struct{ *appsv1.Deployment }
+
+func (a *deploymentAccessor) getReplicas() int32 {
+	if a.Spec.Replicas == nil {
+		return 1
+	}
+	return *a.Spec.Replicas
+}
+func (a *deploymentAccessor) setReplicas(n int32)   { a.Spec.Replicas = &n }
+func (a *deploymentAccessor) isSuspended() bool      { return false }
+func (a *deploymentAccessor) setSuspend(_ bool)      {}
+
+type statefulSetAccessor struct{ *appsv1.StatefulSet }
+
+func (a *statefulSetAccessor) getReplicas() int32 {
+	if a.Spec.Replicas == nil {
+		return 1
+	}
+	return *a.Spec.Replicas
+}
+func (a *statefulSetAccessor) setReplicas(n int32)   { a.Spec.Replicas = &n }
+func (a *statefulSetAccessor) isSuspended() bool      { return false }
+func (a *statefulSetAccessor) setSuspend(_ bool)      {}
+
+type cronJobAccessor struct{ *batchv1.CronJob }
+
+func (a *cronJobAccessor) getReplicas() int32 { return -1 }
+func (a *cronJobAccessor) setReplicas(_ int32) {}
+func (a *cronJobAccessor) isSuspended() bool {
+	return a.Spec.Suspend != nil && *a.Spec.Suspend
+}
+func (a *cronJobAccessor) setSuspend(v bool) { a.Spec.Suspend = &v }
+
+func (r *WorkloadDependencyReconciler) getWorkload(ctx context.Context, kind, name, ns string) (workloadAccessor, error) {
+	key := types.NamespacedName{Name: name, Namespace: ns}
+	switch kind {
+	case "StatefulSet":
+		obj := &appsv1.StatefulSet{}
+		return &statefulSetAccessor{obj}, r.Get(ctx, key, obj)
+	case "CronJob":
+		obj := &batchv1.CronJob{}
+		return &cronJobAccessor{obj}, r.Get(ctx, key, obj)
+	default: // Deployment
+		obj := &appsv1.Deployment{}
+		return &deploymentAccessor{obj}, r.Get(ctx, key, obj)
+	}
+}
+
 type depHealthStatus string
 
 const (
@@ -138,14 +195,26 @@ const (
 	depUnhealthy   depHealthStatus = "Unhealthy"
 )
 
-// depStatus checks if a dependency deployment is healthy, co-suspended by klink, or truly broken.
-// CoSuspended means another WorkloadDependency object is in Suspended phase with this deployment as dependent —
-// i.e. klink itself scaled it to zero. This resolves mutual dependency deadlock (A→B, B→A).
-func (r *WorkloadDependencyReconciler) depStatus(ctx context.Context, d *appsv1.Deployment, cond depsv1alpha1.HealthCondition, ns string) (depHealthStatus, error) {
-	desired := d.Spec.Replicas
-	if desired == nil || *desired == 0 {
-		// Check if another WD is responsible for scaling this deployment to zero
-		suspended, err := r.isSuspendedByKlink(ctx, d.Name, ns)
+func (r *WorkloadDependencyReconciler) depStatus(ctx context.Context, w workloadAccessor, cond depsv1alpha1.HealthCondition, ns string) (depHealthStatus, error) {
+	// CronJob as dependency: healthy if not suspended
+	if cj, ok := w.(*cronJobAccessor); ok {
+		if cj.isSuspended() {
+			suspended, err := r.isSuspendedByKlink(ctx, cj.Name, ns)
+			if err != nil {
+				return depUnhealthy, err
+			}
+			if suspended {
+				return depCoSuspended, nil
+			}
+			return depUnhealthy, nil
+		}
+		return depHealthy, nil
+	}
+
+	// Deployment / StatefulSet: check ready replicas
+	replicas := w.getReplicas()
+	if replicas == 0 {
+		suspended, err := r.isSuspendedByKlink(ctx, w.GetName(), ns)
 		if err != nil {
 			return depUnhealthy, err
 		}
@@ -154,20 +223,28 @@ func (r *WorkloadDependencyReconciler) depStatus(ctx context.Context, d *appsv1.
 		}
 		return depUnhealthy, nil
 	}
+
 	minPercent := cond.MinReadyPercent
 	if minPercent == 0 {
 		minPercent = 100
 	}
-	readyPercent := int32(float64(d.Status.ReadyReplicas) / float64(*desired) * 100)
+
+	var readyReplicas int32
+	switch obj := w.(type) {
+	case *deploymentAccessor:
+		readyReplicas = obj.Status.ReadyReplicas
+	case *statefulSetAccessor:
+		readyReplicas = obj.Status.ReadyReplicas
+	}
+
+	readyPercent := int32(float64(readyReplicas) / float64(replicas) * 100)
 	if readyPercent >= minPercent {
 		return depHealthy, nil
 	}
 	return depUnhealthy, nil
 }
 
-// isSuspendedByKlink returns true if any WorkloadDependency in Suspended phase
-// has this deployment as its dependent — meaning klink scaled it to zero intentionally.
-func (r *WorkloadDependencyReconciler) isSuspendedByKlink(ctx context.Context, deployName, ns string) (bool, error) {
+func (r *WorkloadDependencyReconciler) isSuspendedByKlink(ctx context.Context, name, ns string) (bool, error) {
 	wdList := &depsv1alpha1.WorkloadDependencyList{}
 	if err := r.List(ctx, wdList); err != nil {
 		return false, err
@@ -180,7 +257,7 @@ func (r *WorkloadDependencyReconciler) isSuspendedByKlink(ctx context.Context, d
 		if depNS == "" {
 			depNS = wd.Namespace
 		}
-		if wd.Spec.Dependent.Name == deployName && depNS == ns {
+		if wd.Spec.Dependent.Name == name && depNS == ns {
 			return true, nil
 		}
 	}
@@ -190,7 +267,7 @@ func (r *WorkloadDependencyReconciler) isSuspendedByKlink(ctx context.Context, d
 func (r *WorkloadDependencyReconciler) handleDegraded(
 	ctx context.Context,
 	wd *depsv1alpha1.WorkloadDependency,
-	dependent *appsv1.Deployment,
+	dependent workloadAccessor,
 	msg string,
 	now metav1.Time,
 ) (ctrl.Result, error) {
@@ -209,49 +286,38 @@ func (r *WorkloadDependencyReconciler) handleDegraded(
 		return ctrl.Result{RequeueAfter: remaining + time.Second}, nil
 	}
 
-	// Scale dependent to zero and save replicas
-	currentReplicas := dependent.Spec.Replicas
-	if currentReplicas != nil && *currentReplicas > 0 {
-		saved := *currentReplicas
-		wd.Status.SavedReplicas = &saved
-
-		zero := int32(0)
-		patch := client.MergeFrom(dependent.DeepCopy())
-		dependent.Spec.Replicas = &zero
-		if err := r.Patch(ctx, dependent, patch); err != nil {
-			return ctrl.Result{}, err
-		}
-
-		log.Info("scaled dependent to zero", "deployment", dependent.Name, "savedReplicas", saved)
-		r.Recorder.Eventf(wd, corev1.EventTypeWarning, "ScaledToZero",
-			"Scaled %s to 0 (saved %d replicas): %s", dependent.Name, saved, msg)
+	if err := r.suspendWorkload(ctx, wd, dependent, msg); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	return r.setStatus(ctx, wd, depsv1alpha1.PhaseSuspended, msg, &ctrl.Result{RequeueAfter: 15 * time.Second})
 }
 
-// handleSuspended is called when WD is already Suspended and dependency is still unhealthy.
-// In strict mode it re-enforces scale-to-zero if someone manually scaled up.
 func (r *WorkloadDependencyReconciler) handleSuspended(
 	ctx context.Context,
 	wd *depsv1alpha1.WorkloadDependency,
-	dependent *appsv1.Deployment,
+	dependent workloadAccessor,
 	msg string,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	if wd.Spec.Mode == depsv1alpha1.ModeStrict {
-		currentReplicas := dependent.Spec.Replicas
-		if currentReplicas != nil && *currentReplicas > 0 {
-			log.Info("strict mode: re-enforcing scale-to-zero", "deployment", dependent.Name, "currentReplicas", *currentReplicas)
-			zero := int32(0)
-			patch := client.MergeFrom(dependent.DeepCopy())
-			dependent.Spec.Replicas = &zero
-			if err := r.Patch(ctx, dependent, patch); err != nil {
+		var needsEnforce bool
+		switch obj := dependent.(type) {
+		case *cronJobAccessor:
+			needsEnforce = !obj.isSuspended()
+		default:
+			needsEnforce = dependent.getReplicas() > 0
+		}
+
+		if needsEnforce {
+			log.Info("strict mode: re-enforcing suspension", "name", dependent.GetName())
+			if err := r.suspendWorkload(ctx, wd, dependent, msg); err != nil {
 				return ctrl.Result{}, err
 			}
 			r.Recorder.Eventf(wd, corev1.EventTypeWarning, "StrictEnforced",
-				"Re-enforced scale-to-zero on %s (strict mode): dependency still unhealthy", dependent.Name)
+				"Re-enforced suspension on %s %s (strict mode): dependency still unhealthy",
+				wd.Spec.Dependent.Kind, dependent.GetName())
 		}
 	}
 
@@ -261,7 +327,7 @@ func (r *WorkloadDependencyReconciler) handleSuspended(
 func (r *WorkloadDependencyReconciler) handleHealthy(
 	ctx context.Context,
 	wd *depsv1alpha1.WorkloadDependency,
-	dependent *appsv1.Deployment,
+	dependent workloadAccessor,
 	now metav1.Time,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -275,7 +341,8 @@ func (r *WorkloadDependencyReconciler) handleHealthy(
 
 	if wd.Status.HealthySince == nil {
 		wd.Status.HealthySince = &now
-		return r.setStatus(ctx, wd, depsv1alpha1.PhaseSuspended, "dependencies recovered, waiting recovery window", &ctrl.Result{RequeueAfter: recoveryWindow(wd)})
+		return r.setStatus(ctx, wd, depsv1alpha1.PhaseSuspended, "dependencies recovered, waiting recovery window",
+			&ctrl.Result{RequeueAfter: recoveryWindow(wd)})
 	}
 
 	window := recoveryWindow(wd)
@@ -285,22 +352,126 @@ func (r *WorkloadDependencyReconciler) handleHealthy(
 		return ctrl.Result{RequeueAfter: remaining + time.Second}, nil
 	}
 
-	// Restore replicas
-	if wd.Status.SavedReplicas != nil && *wd.Status.SavedReplicas > 0 {
-		replicas := *wd.Status.SavedReplicas
-		patch := client.MergeFrom(dependent.DeepCopy())
-		dependent.Spec.Replicas = &replicas
-		if err := r.Patch(ctx, dependent, patch); err != nil {
-			return ctrl.Result{}, err
-		}
-		log.Info("restored dependent replicas", "deployment", dependent.Name, "replicas", replicas)
-		r.Recorder.Eventf(wd, corev1.EventTypeNormal, "ReplicasRestored",
-			"Restored %s to %d replicas after dependency recovery", dependent.Name, replicas)
+	if err := r.restoreWorkload(ctx, wd, dependent); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	wd.Status.SavedReplicas = nil
 	wd.Status.HealthySince = nil
 	return r.setStatus(ctx, wd, depsv1alpha1.PhaseHealthy, "all dependencies healthy", nil)
+}
+
+// suspendWorkload scales Deployment/StatefulSet to zero or sets CronJob.suspend=true.
+func (r *WorkloadDependencyReconciler) suspendWorkload(
+	ctx context.Context,
+	wd *depsv1alpha1.WorkloadDependency,
+	w workloadAccessor,
+	msg string,
+) error {
+	log := logf.FromContext(ctx)
+
+	switch obj := w.(type) {
+	case *cronJobAccessor:
+		if obj.isSuspended() {
+			return nil
+		}
+		patch := client.MergeFrom(obj.CronJob.DeepCopy())
+		obj.setSuspend(true)
+		if err := r.Patch(ctx, obj.CronJob, patch); err != nil {
+			return err
+		}
+		log.Info("suspended cronjob", "name", obj.GetName())
+		r.Recorder.Eventf(wd, corev1.EventTypeWarning, "CronJobSuspended",
+			"Suspended CronJob %s: %s", obj.GetName(), msg)
+
+	case *deploymentAccessor:
+		replicas := obj.getReplicas()
+		if replicas == 0 {
+			return nil
+		}
+		saved := replicas
+		wd.Status.SavedReplicas = &saved
+		patch := client.MergeFrom(obj.Deployment.DeepCopy())
+		obj.setReplicas(0)
+		if err := r.Patch(ctx, obj.Deployment, patch); err != nil {
+			return err
+		}
+		log.Info("scaled dependent to zero", "name", obj.GetName(), "savedReplicas", saved)
+		r.Recorder.Eventf(wd, corev1.EventTypeWarning, "ScaledToZero",
+			"Scaled %s %s to 0 (saved %d replicas): %s", wd.Spec.Dependent.Kind, obj.GetName(), saved, msg)
+
+	case *statefulSetAccessor:
+		replicas := obj.getReplicas()
+		if replicas == 0 {
+			return nil
+		}
+		saved := replicas
+		wd.Status.SavedReplicas = &saved
+		patch := client.MergeFrom(obj.StatefulSet.DeepCopy())
+		obj.setReplicas(0)
+		if err := r.Patch(ctx, obj.StatefulSet, patch); err != nil {
+			return err
+		}
+		log.Info("scaled dependent to zero", "name", obj.GetName(), "savedReplicas", saved)
+		r.Recorder.Eventf(wd, corev1.EventTypeWarning, "ScaledToZero",
+			"Scaled %s %s to 0 (saved %d replicas): %s", wd.Spec.Dependent.Kind, obj.GetName(), saved, msg)
+	}
+
+	return nil
+}
+
+// restoreWorkload restores Deployment/StatefulSet replicas or unsuspends CronJob.
+func (r *WorkloadDependencyReconciler) restoreWorkload(
+	ctx context.Context,
+	wd *depsv1alpha1.WorkloadDependency,
+	w workloadAccessor,
+) error {
+	log := logf.FromContext(ctx)
+
+	switch obj := w.(type) {
+	case *cronJobAccessor:
+		if !obj.isSuspended() {
+			return nil
+		}
+		patch := client.MergeFrom(obj.CronJob.DeepCopy())
+		obj.setSuspend(false)
+		if err := r.Patch(ctx, obj.CronJob, patch); err != nil {
+			return err
+		}
+		log.Info("unsuspended cronjob", "name", obj.GetName())
+		r.Recorder.Eventf(wd, corev1.EventTypeNormal, "CronJobResumed",
+			"Resumed CronJob %s after dependency recovery", obj.GetName())
+
+	case *deploymentAccessor:
+		if wd.Status.SavedReplicas == nil || *wd.Status.SavedReplicas == 0 {
+			return nil
+		}
+		replicas := *wd.Status.SavedReplicas
+		patch := client.MergeFrom(obj.Deployment.DeepCopy())
+		obj.setReplicas(replicas)
+		if err := r.Patch(ctx, obj.Deployment, patch); err != nil {
+			return err
+		}
+		log.Info("restored dependent replicas", "name", obj.GetName(), "replicas", replicas)
+		r.Recorder.Eventf(wd, corev1.EventTypeNormal, "ReplicasRestored",
+			"Restored %s %s to %d replicas after dependency recovery", wd.Spec.Dependent.Kind, obj.GetName(), replicas)
+
+	case *statefulSetAccessor:
+		if wd.Status.SavedReplicas == nil || *wd.Status.SavedReplicas == 0 {
+			return nil
+		}
+		replicas := *wd.Status.SavedReplicas
+		patch := client.MergeFrom(obj.StatefulSet.DeepCopy())
+		obj.setReplicas(replicas)
+		if err := r.Patch(ctx, obj.StatefulSet, patch); err != nil {
+			return err
+		}
+		log.Info("restored dependent replicas", "name", obj.GetName(), "replicas", replicas)
+		r.Recorder.Eventf(wd, corev1.EventTypeNormal, "ReplicasRestored",
+			"Restored %s %s to %d replicas after dependency recovery", wd.Spec.Dependent.Kind, obj.GetName(), replicas)
+	}
+
+	return nil
 }
 
 func (r *WorkloadDependencyReconciler) setStatus(
@@ -345,17 +516,14 @@ func recoveryWindow(wd *depsv1alpha1.WorkloadDependency) time.Duration {
 func (r *WorkloadDependencyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&depsv1alpha1.WorkloadDependency{}).
-		Watches(
-			&appsv1.Deployment{},
-			handler.EnqueueRequestsFromMapFunc(r.findWDsForDeployment),
-		).
+		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.findWDsForWorkload)).
+		Watches(&appsv1.StatefulSet{}, handler.EnqueueRequestsFromMapFunc(r.findWDsForWorkload)).
+		Watches(&batchv1.CronJob{}, handler.EnqueueRequestsFromMapFunc(r.findWDsForWorkload)).
 		Named("workloaddependency").
 		Complete(r)
 }
 
-// findWDsForDeployment maps a Deployment change to all WorkloadDependency objects that reference it —
-// either as a dependency (dependsOn) or as the dependent itself (for strict mode re-enforcement).
-func (r *WorkloadDependencyReconciler) findWDsForDeployment(ctx context.Context, obj client.Object) []ctrl.Request {
+func (r *WorkloadDependencyReconciler) findWDsForWorkload(ctx context.Context, obj client.Object) []ctrl.Request {
 	wdList := &depsv1alpha1.WorkloadDependencyList{}
 	if err := r.List(ctx, wdList); err != nil {
 		return nil
@@ -373,7 +541,6 @@ func (r *WorkloadDependencyReconciler) findWDsForDeployment(ctx context.Context,
 	}
 
 	for _, wd := range wdList.Items {
-		// Watch dependsOn deployments
 		for _, dep := range wd.Spec.DependsOn {
 			ns := dep.Namespace
 			if ns == "" {
@@ -385,7 +552,6 @@ func (r *WorkloadDependencyReconciler) findWDsForDeployment(ctx context.Context,
 			}
 		}
 
-		// Watch dependent deployment too (for strict mode re-enforcement)
 		depNS := wd.Spec.Dependent.Namespace
 		if depNS == "" {
 			depNS = wd.Namespace

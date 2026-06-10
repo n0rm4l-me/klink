@@ -21,12 +21,16 @@ import (
 )
 
 type WorkloadRef struct {
-	// +kubebuilder:validation:Enum=Deployment
+	// +kubebuilder:validation:Enum=Deployment;StatefulSet;CronJob
 	Kind string `json:"kind"`
 	Name string `json:"name"`
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 }
+
+// DependsOnKind lists workload types that can be used as a dependency source.
+// CronJob cannot be a dependency (it has no ready replicas to check).
+type DependsOnKind = string
 
 type HealthCondition struct {
 	// Minimum percentage of ready replicas to consider the workload healthy.

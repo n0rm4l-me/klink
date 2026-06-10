@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -76,6 +77,7 @@ var _ = BeforeSuite(func() {
 
 	Expect(depsv1alpha1.AddToScheme(scheme.Scheme)).To(Succeed())
 	Expect(appsv1.AddToScheme(scheme.Scheme)).To(Succeed())
+	Expect(batchv1.AddToScheme(scheme.Scheme)).To(Succeed())
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
@@ -86,7 +88,7 @@ var _ = BeforeSuite(func() {
 	err = (&WorkloadDependencyReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: &record.FakeRecorder{},
+		Recorder: record.NewFakeRecorder(100),
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
@@ -161,4 +163,62 @@ func getPhase(wdName, namespace string) depsv1alpha1.DependencyPhase {
 	wd := &depsv1alpha1.WorkloadDependency{}
 	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: wdName, Namespace: namespace}, wd)).To(Succeed())
 	return wd.Status.Phase
+}
+
+func makeStatefulSet(name, namespace string, replicas int32) *appsv1.StatefulSet {
+	r := replicas
+	return &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas:    &r,
+			ServiceName: name,
+			Selector:    &metav1.LabelSelector{MatchLabels: map[string]string{"app": name}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": name}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: name, Image: "nginx"}}},
+			},
+		},
+	}
+}
+
+func setStatefulSetReady(sts *appsv1.StatefulSet, ready int32) {
+	sts.Status.Replicas = *sts.Spec.Replicas
+	sts.Status.ReadyReplicas = ready
+	Expect(k8sClient.Status().Update(ctx, sts)).To(Succeed())
+}
+
+func getStatefulSetReplicas(name, namespace string) int32 {
+	sts := &appsv1.StatefulSet{}
+	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, sts)).To(Succeed())
+	if sts.Spec.Replicas == nil {
+		return 0
+	}
+	return *sts.Spec.Replicas
+}
+
+func makeCronJob(name, namespace string) *batchv1.CronJob {
+	f := false
+	return &batchv1.CronJob{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: batchv1.CronJobSpec{
+			Schedule: "*/5 * * * *",
+			Suspend:  &f,
+			JobTemplate: batchv1.JobTemplateSpec{
+				Spec: batchv1.JobSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							RestartPolicy: corev1.RestartPolicyNever,
+							Containers:    []corev1.Container{{Name: name, Image: "busybox"}},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func isCronJobSuspended(name, namespace string) bool {
+	cj := &batchv1.CronJob{}
+	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, cj)).To(Succeed())
+	return cj.Spec.Suspend != nil && *cj.Spec.Suspend
 }

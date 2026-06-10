@@ -10,16 +10,16 @@ You declare a `WorkloadDependency` resource that links two deployments:
 apiVersion: deps.klink.dev/v1alpha1
 kind: WorkloadDependency
 metadata:
-  name: redeem-needs-grant
+  name: payments-needs-database
   namespace: my-app
 spec:
   dependent:
     kind: Deployment
-    name: redeem
+    name: payments
 
   dependsOn:
     - kind: Deployment
-      name: grant
+      name: database
       condition:
         minReadyPercent: 80   # healthy if ≥80% replicas ready
         window: 30s            # wait 30s before acting (hysteresis)
@@ -31,10 +31,10 @@ spec:
   mode: strict  # strict | soft
 ```
 
-When `grant` becomes unhealthy:
+When `database` becomes unhealthy:
 1. klink waits for `window` (hysteresis — ignores transient restarts)
-2. Scales `redeem` to 0, saving its replica count
-3. When `grant` recovers, waits for `recoveryWindow`, then restores `redeem`
+2. Scales `payments` to 0, saving its replica count
+3. When `database` recovers, waits for `recoveryWindow`, then restores `payments`
 
 ## Enforcement modes
 
@@ -49,17 +49,17 @@ When `grant` becomes unhealthy:
 To temporarily disable enforcement without deleting the resource:
 
 ```bash
-kubectl annotate workloaddependency redeem-needs-grant klink.dev/paused=true
+kubectl annotate workloaddependency payments-needs-database klink.dev/paused=true
 
 # Resume:
-kubectl annotate workloaddependency redeem-needs-grant klink.dev/paused-
+kubectl annotate workloaddependency payments-needs-database klink.dev/paused-
 ```
 
 Phase becomes `Paused` while annotation is set.
 
 ## Mutual dependencies
 
-klink handles the A→B + B→A case without deadlock. When `redeem` is scaled to zero by klink, it is marked as `CoSuspended`. Other `WorkloadDependency` objects that depend on `redeem` treat it as a non-failure — they won't cascade-suspend their own dependents.
+klink handles the A→B + B→A case without deadlock. When `payments` is scaled to zero by klink, it is marked as `CoSuspended`. Other `WorkloadDependency` objects that depend on `payments` treat it as a non-failure — they won't cascade-suspend their own dependents.
 
 When you manually restore one service, klink automatically restores the other.
 
@@ -69,7 +69,7 @@ When you manually restore one service, klink automatically restores the other.
 kubectl get workloaddependencies -A
 
 NAMESPACE  NAME                 PHASE       REPLICAS   MESSAGE                              AGE
-my-app     redeem-needs-grant   Suspended   2          dependency grant not healthy (0/0)   5m
+my-app     payments-needs-database   Suspended   2          dependency database not healthy (0/0)   5m
 ```
 
 | Phase | Meaning |
