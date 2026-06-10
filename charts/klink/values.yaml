@@ -1,0 +1,32 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/n0rm4l-me/klink
+  pullPolicy: Always
+  tag: ""  # defaults to Chart.appVersion
+
+imagePullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+leaderElection:
+  enabled: true
+
+metrics:
+  enabled: false
+  port: 8443
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

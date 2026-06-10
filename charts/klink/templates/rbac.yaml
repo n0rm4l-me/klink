@@ -1,0 +1,42 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "klink.fullname" . }}-manager
+  labels:
+    {{- include "klink.labels" . | nindent 4 }}
+rules:
+- apiGroups: ["deps.klink.dev"]
+  resources: ["workloaddependencies"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["deps.klink.dev"]
+  resources: ["workloaddependencies/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["deps.klink.dev"]
+  resources: ["workloaddependencies/finalizers"]
+  verbs: ["update"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+{{- if .Values.leaderElection.enabled }}
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "klink.fullname" . }}-manager
+  labels:
+    {{- include "klink.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "klink.fullname" . }}-manager
+subjects:
+- kind: ServiceAccount
+  name: {{ include "klink.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}

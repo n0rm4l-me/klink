@@ -1,0 +1,14 @@
+apiVersion: v2
+name: klink
+description: Kubernetes operator for workload dependency management
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - kubernetes
+  - operator
+  - dependencies
+  - workload
+home: https://github.com/n0rm4l-me/klink
+sources:
+  - https://github.com/n0rm4l-me/klink
