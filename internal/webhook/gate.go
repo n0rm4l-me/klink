@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	admissionv1 "k8s.io/api/admission/v1"
@@ -59,8 +60,11 @@ func (h *GateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log := logf.FromContext(ctx)
 
-	body := make([]byte, r.ContentLength)
-	if _, err := r.Body.Read(body); err != nil {
+	log.Info("webhook request received", "path", r.URL.Path, "method", r.Method, "remote", r.RemoteAddr)
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Error(err, "failed to read request body")
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}
@@ -90,6 +94,9 @@ func (h *GateHandler) validate(ctx context.Context, req *admissionv1.AdmissionRe
 	}
 
 	oldReplicas, _ := extractReplicas(req.OldObject.Raw, req.Kind.Kind)
+
+	log.Info("gate check", "kind", req.Kind.Kind, "name", req.Name, "namespace", req.Namespace,
+		"oldReplicas", oldReplicas, "newReplicas", newReplicas, "resource", req.Resource.Resource, "subresource", req.SubResource)
 
 	// Only block if someone is trying to scale UP
 	if newReplicas <= oldReplicas {
