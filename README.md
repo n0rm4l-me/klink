@@ -2,9 +2,16 @@
 
 Kubernetes operator for workload dependency management. Automatically scales dependent services to zero when their dependencies become unhealthy, and restores them when dependencies recover.
 
-## How it works
+## Supported workload types
 
-You declare a `WorkloadDependency` resource that links two deployments:
+| Kind | As dependent | As dependency | Notes |
+|------|-------------|--------------|-------|
+| `Deployment` | ✅ scale to 0 | ✅ readyReplicas check | |
+| `StatefulSet` | ✅ scale to 0 | ✅ readyReplicas check | |
+| `CronJob` | ✅ suspend=true | — | no replicas concept |
+| `Rollout` (Argo) | ✅ scale to 0 | ✅ phase check | Progressing = healthy as dependency; suspension deferred during active canary |
+
+## How it works
 
 ```yaml
 apiVersion: deps.klink.dev/v1alpha1
@@ -14,7 +21,7 @@ metadata:
   namespace: my-app
 spec:
   dependent:
-    kind: Deployment
+    kind: Rollout        # Deployment | StatefulSet | CronJob | Rollout
     name: payments
 
   dependsOn:
@@ -36,17 +43,19 @@ When `database` becomes unhealthy:
 2. Scales `payments` to 0, saving its replica count
 3. When `database` recovers, waits for `recoveryWindow`, then restores `payments`
 
+For **CronJob** dependents: sets `spec.suspend=true` instead of scaling. Resumes on recovery.
+
+For **Rollout** dependents: if a canary or blue-green rollout is in progress (`Progressing` phase), suspension is **deferred** until the rollout completes — klink never interrupts an active deployment.
+
 ## Enforcement modes
 
 | Mode | Behavior |
 |------|----------|
-| `strict` | Re-enforces scale-to-zero if someone manually scales up while dependency is down. Reverts within 15s. |
+| `strict` | Re-enforces scale-to-zero on every reconcile while dependency is down. Manual scale-up reverted within 15s. |
 | `soft` | Scales to zero once but does not fight manual changes. |
 | `gate` | Blocks dependent from starting until dependency is healthy (v0.2, requires admission webhook). |
 
 ## Pausing
-
-To temporarily disable enforcement without deleting the resource:
 
 ```bash
 kubectl annotate workloaddependency payments-needs-database klink.dev/paused=true
@@ -55,11 +64,11 @@ kubectl annotate workloaddependency payments-needs-database klink.dev/paused=tru
 kubectl annotate workloaddependency payments-needs-database klink.dev/paused-
 ```
 
-Phase becomes `Paused` while annotation is set.
+Phase becomes `Paused` while annotation is set. klink stops all enforcement.
 
 ## Mutual dependencies
 
-klink handles the A→B + B→A case without deadlock. When `payments` is scaled to zero by klink, it is marked as `CoSuspended`. Other `WorkloadDependency` objects that depend on `payments` treat it as a non-failure — they won't cascade-suspend their own dependents.
+klink handles A→B + B→A without deadlock. When klink scales a service to zero, other `WorkloadDependency` objects that depend on it recognize it as `CoSuspended` (not a real failure) and don't cascade.
 
 When you manually restore one service, klink automatically restores the other.
 
@@ -68,17 +77,18 @@ When you manually restore one service, klink automatically restores the other.
 ```
 kubectl get workloaddependencies -A
 
-NAMESPACE  NAME                 PHASE       REPLICAS   MESSAGE                              AGE
-my-app     payments-needs-database   Suspended   2          dependency database not healthy (0/0)   5m
+NAMESPACE  NAME                      PHASE       REPLICAS   MESSAGE                                    AGE
+my-app     payments-needs-database   Suspended   3          dependency database not healthy (0/0)      5m
+my-app     billing-needs-database    Suspended              dependency database not healthy — CronJob   5m
 ```
 
 | Phase | Meaning |
 |-------|---------|
 | `Healthy` | All dependencies healthy |
 | `Degraded` | Dependency unhealthy, within hysteresis window |
-| `Suspended` | Dependent scaled to zero |
-| `Paused` | Enforcement disabled via annotation |
-| `Unknown` | Dependent deployment not found |
+| `Suspended` | Dependent scaled to zero (or CronJob suspended) |
+| `Paused` | Enforcement disabled via `klink.dev/paused` annotation |
+| `Unknown` | Dependent workload not found |
 
 ## Installation
 
@@ -102,12 +112,12 @@ helm upgrade --install klink ./charts/klink \
 ```yaml
 spec:
   dependent:
-    kind: Deployment      # only Deployment supported in v0.1
+    kind: Deployment | StatefulSet | CronJob | Rollout
     name: string
     namespace: string     # optional, defaults to WorkloadDependency namespace
 
   dependsOn:
-    - kind: Deployment
+    - kind: Deployment | StatefulSet | Rollout   # CronJob not supported as dependency
       name: string
       namespace: string   # optional, cross-namespace supported
       condition:
@@ -116,10 +126,22 @@ spec:
         recoveryWindow: 60s    # default 60s
 
   onDegraded:
-    action: ScaleToZero   # only action in v0.1
+    action: ScaleToZero
 
-  mode: strict            # strict | soft, default strict
+  mode: strict | soft     # default strict
 ```
+
+## k9s plugins
+
+Copy `contrib/k9s-plugins.yaml` entries into `~/.config/k9s/plugins.yaml`.
+
+| Shortcut | Action |
+|----------|--------|
+| `d` | Describe WorkloadDependency |
+| `Ctrl-E` | Show events |
+| `Ctrl-L` | Operator logs |
+| `Ctrl-S` | Show dependent workload |
+| `Ctrl-F` | Force reconcile |
 
 ## Development
 
@@ -129,21 +151,19 @@ spec:
 # Generate CRDs and deepcopy
 make manifests generate
 
-# Run tests (downloads envtest binaries automatically)
+# Run tests
 make test
 
 # Build image
-make image-build
+make image-build IMG=your-registry/klink:tag
 
 # Push image
-make image-push
+make image-push IMG=your-registry/klink:tag
 ```
 
-## Roadmap (v0.2)
+## Roadmap
 
-- StatefulSet and DaemonSet support
-- `gate` mode via admission webhook
-- CronJob suspend when dependency unavailable
+- `gate` mode — admission webhook blocks dependent from starting until dependency is healthy
 - Prometheus-based health conditions
-- Dependency graph visualization
-- Cycle detection
+- Dependency graph visualization and cycle detection
+- DaemonSet support
