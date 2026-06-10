@@ -690,4 +690,164 @@ var _ = Describe("WorkloadDependency controller", func() {
 			Expect(wdObj.Status.SavedReplicas).To(BeNil())
 		})
 	})
+
+	Describe("Rollout support", func() {
+		It("should scale Rollout to zero when dependency fails", func() {
+			dep := makeDeployment("foo", ns, 2)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			setReady(dep, 2)
+
+			ro := makeRollout("payments", ns, 3, rolloutPhaseHealthy)
+			Expect(k8sClient.Create(ctx, ro)).To(Succeed())
+			setRolloutPhase("payments", ns, rolloutPhaseHealthy)
+
+			wd := &depsv1alpha1.WorkloadDependency{
+				ObjectMeta: metav1.ObjectMeta{Name: "wd", Namespace: ns},
+				Spec: depsv1alpha1.WorkloadDependencySpec{
+					Dependent: depsv1alpha1.WorkloadRef{Kind: "Rollout", Name: "payments"},
+					DependsOn: []depsv1alpha1.DependsOnEntry{{
+						Kind: "Deployment", Name: "foo",
+						Condition: depsv1alpha1.HealthCondition{
+							MinReadyPercent: 100,
+							Window:          metav1.Duration{Duration: shortWindow},
+							RecoveryWindow:  metav1.Duration{Duration: shortRecovery},
+						},
+					}},
+					OnDegraded: depsv1alpha1.OnDegradedSpec{Action: depsv1alpha1.ActionScaleToZero},
+					Mode:       depsv1alpha1.ModeSoft,
+				},
+			}
+			Expect(k8sClient.Create(ctx, wd)).To(Succeed())
+
+			Eventually(func() depsv1alpha1.DependencyPhase {
+				return getPhase("wd", ns)
+			}, timeout, interval).Should(Equal(depsv1alpha1.PhaseHealthy))
+
+			// Kill dependency
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "foo", Namespace: ns}, dep)).To(Succeed())
+			zero := int32(0)
+			dep.Spec.Replicas = &zero
+			Expect(k8sClient.Update(ctx, dep)).To(Succeed())
+			setReady(dep, 0)
+
+			Eventually(func() int32 {
+				return getRolloutReplicas("payments", ns)
+			}, timeout, interval).Should(Equal(int32(0)))
+
+			wdObj := &depsv1alpha1.WorkloadDependency{}
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "wd", Namespace: ns}, wdObj)).To(Succeed())
+			Expect(wdObj.Status.SavedReplicas).NotTo(BeNil())
+			Expect(*wdObj.Status.SavedReplicas).To(Equal(int32(3)))
+
+			// Restore dependency — Rollout should come back
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "foo", Namespace: ns}, dep)).To(Succeed())
+			two := int32(2)
+			dep.Spec.Replicas = &two
+			Expect(k8sClient.Update(ctx, dep)).To(Succeed())
+			setReady(dep, 2)
+
+			Eventually(func() int32 {
+				return getRolloutReplicas("payments", ns)
+			}, timeout, interval).Should(Equal(int32(3)))
+		})
+
+		It("should defer suspension when Rollout is Progressing (canary in flight)", func() {
+			dep := makeDeployment("foo", ns, 2)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			setReady(dep, 2)
+
+			ro := makeRollout("payments", ns, 3, rolloutPhaseHealthy)
+			Expect(k8sClient.Create(ctx, ro)).To(Succeed())
+			setRolloutPhase("payments", ns, rolloutPhaseHealthy)
+
+			wd := &depsv1alpha1.WorkloadDependency{
+				ObjectMeta: metav1.ObjectMeta{Name: "wd", Namespace: ns},
+				Spec: depsv1alpha1.WorkloadDependencySpec{
+					Dependent: depsv1alpha1.WorkloadRef{Kind: "Rollout", Name: "payments"},
+					DependsOn: []depsv1alpha1.DependsOnEntry{{
+						Kind: "Deployment", Name: "foo",
+						Condition: depsv1alpha1.HealthCondition{
+							MinReadyPercent: 100,
+							Window:          metav1.Duration{Duration: shortWindow},
+							RecoveryWindow:  metav1.Duration{Duration: shortRecovery},
+						},
+					}},
+					OnDegraded: depsv1alpha1.OnDegradedSpec{Action: depsv1alpha1.ActionScaleToZero},
+					Mode:       depsv1alpha1.ModeStrict,
+				},
+			}
+			Expect(k8sClient.Create(ctx, wd)).To(Succeed())
+
+			Eventually(func() depsv1alpha1.DependencyPhase {
+				return getPhase("wd", ns)
+			}, timeout, interval).Should(Equal(depsv1alpha1.PhaseHealthy))
+
+			// Set Rollout to Progressing (simulates canary in flight)
+			setRolloutPhase("payments", ns, rolloutPhaseProgressing)
+
+			// Kill dependency
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "foo", Namespace: ns}, dep)).To(Succeed())
+			zero := int32(0)
+			dep.Spec.Replicas = &zero
+			Expect(k8sClient.Update(ctx, dep)).To(Succeed())
+			setReady(dep, 0)
+
+			// Should become Degraded but NOT Suspended — canary is in progress
+			Eventually(func() depsv1alpha1.DependencyPhase {
+				return getPhase("wd", ns)
+			}, timeout, interval).Should(Equal(depsv1alpha1.PhaseDegraded))
+
+			Consistently(func() int32 {
+				return getRolloutReplicas("payments", ns)
+			}, 5*time.Second, interval).Should(Equal(int32(3)))
+
+			// Canary finishes — Rollout becomes Healthy
+			setRolloutPhase("payments", ns, rolloutPhaseHealthy)
+
+			// Now it should suspend
+			Eventually(func() int32 {
+				return getRolloutReplicas("payments", ns)
+			}, timeout, interval).Should(Equal(int32(0)))
+		})
+
+		It("should treat Rollout as healthy dependency when Progressing", func() {
+			// Rollout in Progressing phase should still be healthy AS A DEPENDENCY
+			ro := makeRollout("database", ns, 2, rolloutPhaseProgressing)
+			Expect(k8sClient.Create(ctx, ro)).To(Succeed())
+			setRolloutPhase("database", ns, rolloutPhaseProgressing)
+
+			payments := makeDeployment("payments", ns, 2)
+			Expect(k8sClient.Create(ctx, payments)).To(Succeed())
+			setReady(payments, 2)
+
+			wd := &depsv1alpha1.WorkloadDependency{
+				ObjectMeta: metav1.ObjectMeta{Name: "wd", Namespace: ns},
+				Spec: depsv1alpha1.WorkloadDependencySpec{
+					Dependent: depsv1alpha1.WorkloadRef{Kind: "Deployment", Name: "payments"},
+					DependsOn: []depsv1alpha1.DependsOnEntry{{
+						Kind: "Rollout", Name: "database",
+						Condition: depsv1alpha1.HealthCondition{
+							Window:         metav1.Duration{Duration: shortWindow},
+							RecoveryWindow: metav1.Duration{Duration: shortRecovery},
+						},
+					}},
+					OnDegraded: depsv1alpha1.OnDegradedSpec{Action: depsv1alpha1.ActionScaleToZero},
+					Mode:       depsv1alpha1.ModeSoft,
+				},
+			}
+			Expect(k8sClient.Create(ctx, wd)).To(Succeed())
+
+			// Progressing Rollout as dependency = Healthy
+			Eventually(func() depsv1alpha1.DependencyPhase {
+				return getPhase("wd", ns)
+			}, timeout, interval).Should(Equal(depsv1alpha1.PhaseHealthy))
+
+			// Rollout becomes Degraded → should trigger suspension
+			setRolloutPhase("database", ns, rolloutPhaseDegraded)
+
+			Eventually(func() int32 {
+				return getReplicas("payments", ns)
+			}, timeout, interval).Should(Equal(int32(0)))
+		})
+	})
 })

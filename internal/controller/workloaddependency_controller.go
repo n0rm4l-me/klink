@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -49,6 +50,7 @@ type WorkloadDependencyReconciler struct {
 // +kubebuilder:rbac:groups=deps.klink.dev,resources=workloaddependencies/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=argoproj.io,resources=rollouts,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 func (r *WorkloadDependencyReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -116,6 +118,18 @@ func (r *WorkloadDependencyReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	now := metav1.Now()
 
+	// Rollout-specific: if dependent is a Rollout currently progressing (canary/blue-green in flight),
+	// defer all suspension actions — the stable version is still serving traffic.
+	// We still track DegradedSince so the window starts counting, but we don't act.
+	if !allOk {
+		if ro, ok := dependent.(*rolloutAccessor); ok && ro.isProgressing() {
+			log.Info("dependent Rollout is progressing, deferring suspension", "rollout", ro.GetName())
+			return r.setStatus(ctx, wd, depsv1alpha1.PhaseDegraded,
+				fmt.Sprintf("dependency unhealthy, action deferred — rollout %s is progressing", ro.GetName()),
+				&ctrl.Result{RequeueAfter: 15 * time.Second})
+		}
+	}
+
 	if !allOk && wd.Status.Phase == depsv1alpha1.PhaseSuspended {
 		return r.handleSuspended(ctx, wd, dependent, unhealthyMsg)
 	}
@@ -181,6 +195,8 @@ func (r *WorkloadDependencyReconciler) getWorkload(ctx context.Context, kind, na
 	case "CronJob":
 		obj := &batchv1.CronJob{}
 		return &cronJobAccessor{obj}, r.Get(ctx, key, obj)
+	case "Rollout":
+		return getRollout(ctx, r.Client, name, ns)
 	default: // Deployment
 		obj := &appsv1.Deployment{}
 		return &deploymentAccessor{obj}, r.Get(ctx, key, obj)
@@ -196,6 +212,22 @@ const (
 )
 
 func (r *WorkloadDependencyReconciler) depStatus(ctx context.Context, w workloadAccessor, cond depsv1alpha1.HealthCondition, ns string) (depHealthStatus, error) {
+	// Rollout as dependency: healthy if Healthy/Progressing/Paused, unhealthy if Degraded
+	if ro, ok := w.(*rolloutAccessor); ok {
+		if ro.isHealthyAsDependency() {
+			return depHealthy, nil
+		}
+		// Rollout is Degraded — check if klink suspended it
+		suspended, err := r.isSuspendedByKlink(ctx, ro.GetName(), ns)
+		if err != nil {
+			return depUnhealthy, err
+		}
+		if suspended {
+			return depCoSuspended, nil
+		}
+		return depUnhealthy, nil
+	}
+
 	// CronJob as dependency: healthy if not suspended
 	if cj, ok := w.(*cronJobAccessor); ok {
 		if cj.isSuspended() {
@@ -302,6 +334,12 @@ func (r *WorkloadDependencyReconciler) handleSuspended(
 	log := logf.FromContext(ctx)
 
 	if wd.Spec.Mode == depsv1alpha1.ModeStrict {
+		// Never re-enforce during an active canary — wait for it to complete
+		if ro, ok := dependent.(*rolloutAccessor); ok && ro.isProgressing() {
+			log.Info("strict mode: deferring re-enforcement, rollout is progressing", "rollout", ro.GetName())
+			return r.setStatus(ctx, wd, depsv1alpha1.PhaseSuspended, msg, &ctrl.Result{RequeueAfter: 15 * time.Second})
+		}
+
 		var needsEnforce bool
 		switch obj := dependent.(type) {
 		case *cronJobAccessor:
@@ -415,12 +453,28 @@ func (r *WorkloadDependencyReconciler) suspendWorkload(
 		log.Info("scaled dependent to zero", "name", obj.GetName(), "savedReplicas", saved)
 		r.Recorder.Eventf(wd, corev1.EventTypeWarning, "ScaledToZero",
 			"Scaled %s %s to 0 (saved %d replicas): %s", wd.Spec.Dependent.Kind, obj.GetName(), saved, msg)
+
+	case *rolloutAccessor:
+		replicas := obj.getReplicas()
+		if replicas == 0 {
+			return nil
+		}
+		saved := replicas
+		wd.Status.SavedReplicas = &saved
+		base := obj.Unstructured.DeepCopy()
+		obj.setReplicas(0)
+		if err := r.Patch(ctx, obj.Unstructured, client.MergeFrom(base)); err != nil {
+			return err
+		}
+		log.Info("scaled rollout to zero", "name", obj.GetName(), "savedReplicas", saved)
+		r.Recorder.Eventf(wd, corev1.EventTypeWarning, "ScaledToZero",
+			"Scaled Rollout %s to 0 (saved %d replicas): %s", obj.GetName(), saved, msg)
 	}
 
 	return nil
 }
 
-// restoreWorkload restores Deployment/StatefulSet replicas or unsuspends CronJob.
+// restoreWorkload restores Deployment/StatefulSet/Rollout replicas or unsuspends CronJob.
 func (r *WorkloadDependencyReconciler) restoreWorkload(
 	ctx context.Context,
 	wd *depsv1alpha1.WorkloadDependency,
@@ -469,6 +523,20 @@ func (r *WorkloadDependencyReconciler) restoreWorkload(
 		log.Info("restored dependent replicas", "name", obj.GetName(), "replicas", replicas)
 		r.Recorder.Eventf(wd, corev1.EventTypeNormal, "ReplicasRestored",
 			"Restored %s %s to %d replicas after dependency recovery", wd.Spec.Dependent.Kind, obj.GetName(), replicas)
+
+	case *rolloutAccessor:
+		if wd.Status.SavedReplicas == nil || *wd.Status.SavedReplicas == 0 {
+			return nil
+		}
+		replicas := *wd.Status.SavedReplicas
+		base := obj.Unstructured.DeepCopy()
+		obj.setReplicas(replicas)
+		if err := r.Patch(ctx, obj.Unstructured, client.MergeFrom(base)); err != nil {
+			return err
+		}
+		log.Info("restored rollout replicas", "name", obj.GetName(), "replicas", replicas)
+		r.Recorder.Eventf(wd, corev1.EventTypeNormal, "ReplicasRestored",
+			"Restored Rollout %s to %d replicas after dependency recovery", obj.GetName(), replicas)
 	}
 
 	return nil
@@ -514,11 +582,15 @@ func recoveryWindow(wd *depsv1alpha1.WorkloadDependency) time.Duration {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *WorkloadDependencyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	rolloutObj := &unstructured.Unstructured{}
+	rolloutObj.SetGroupVersionKind(rolloutGVK)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&depsv1alpha1.WorkloadDependency{}).
 		Watches(&appsv1.Deployment{}, handler.EnqueueRequestsFromMapFunc(r.findWDsForWorkload)).
 		Watches(&appsv1.StatefulSet{}, handler.EnqueueRequestsFromMapFunc(r.findWDsForWorkload)).
 		Watches(&batchv1.CronJob{}, handler.EnqueueRequestsFromMapFunc(r.findWDsForWorkload)).
+		Watches(rolloutObj, handler.EnqueueRequestsFromMapFunc(r.findWDsForWorkload)).
 		Named("workloaddependency").
 		Complete(r)
 }

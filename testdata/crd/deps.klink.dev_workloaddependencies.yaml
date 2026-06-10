@@ -57,6 +57,7 @@ spec:
                     - Deployment
                     - StatefulSet
                     - CronJob
+                    - Rollout
                     type: string
                   name:
                     type: string

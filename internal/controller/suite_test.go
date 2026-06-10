@@ -29,6 +29,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -215,6 +216,55 @@ func makeCronJob(name, namespace string) *batchv1.CronJob {
 			},
 		},
 	}
+}
+
+func makeRollout(name, namespace string, replicas int32, phase string) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(rolloutGVK)
+	obj.SetName(name)
+	obj.SetNamespace(namespace)
+	_ = unstructured.SetNestedField(obj.Object, int64(replicas), "spec", "replicas")
+	_ = unstructured.SetNestedField(obj.Object, phase, "status", "phase")
+	// minimal spec to satisfy CRD validation
+	_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+		"matchLabels": map[string]interface{}{"app": name},
+	}, "spec", "selector")
+	_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"labels": map[string]interface{}{"app": name},
+		},
+		"spec": map[string]interface{}{
+			"containers": []interface{}{
+				map[string]interface{}{"name": name, "image": "nginx"},
+			},
+		},
+	}, "spec", "template")
+	return obj
+}
+
+func setRolloutPhase(name, namespace, phase string) {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(rolloutGVK)
+	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, obj)).To(Succeed())
+	base := obj.DeepCopy()
+	_ = unstructured.SetNestedField(obj.Object, phase, "status", "phase")
+	Expect(k8sClient.Status().Patch(ctx, obj, client.MergeFrom(base))).To(Succeed())
+}
+
+func getRolloutReplicas(name, namespace string) int32 {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(rolloutGVK)
+	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, obj)).To(Succeed())
+	r, _, _ := unstructured.NestedInt64(obj.Object, "spec", "replicas")
+	return int32(r)
+}
+
+func getRolloutPhase(name, namespace string) string {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(rolloutGVK)
+	Expect(k8sClient.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, obj)).To(Succeed())
+	p, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
+	return p
 }
 
 func isCronJobSuspended(name, namespace string) bool {
