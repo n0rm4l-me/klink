@@ -130,6 +130,15 @@ func (r *WorkloadDependencyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
+	// Gate mode: never scale dependent — only block scale-up via admission webhook.
+	// Just track health status so the webhook can check it.
+	if wd.Spec.Mode == depsv1alpha1.ModeGate {
+		if allOk {
+			return r.setStatus(ctx, wd, depsv1alpha1.PhaseHealthy, "all dependencies healthy", nil)
+		}
+		return r.setStatus(ctx, wd, depsv1alpha1.PhaseDegraded, unhealthyMsg, nil)
+	}
+
 	if !allOk && wd.Status.Phase == depsv1alpha1.PhaseSuspended {
 		return r.handleSuspended(ctx, wd, dependent, unhealthyMsg)
 	}
