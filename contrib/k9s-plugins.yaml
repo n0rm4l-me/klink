@@ -1,0 +1,74 @@
+# klink k9s plugins
+# Install: merge into ~/.config/k9s/plugins.yaml
+plugins:
+  klink-describe:
+    shortCut: d
+    description: Describe WorkloadDependency
+    scopes:
+      - workloaddependencies
+    command: kubectl
+    background: false
+    args:
+      - describe
+      - workloaddependency
+      - $NAME
+      - -n
+      - $NAMESPACE
+
+  klink-events:
+    shortCut: Ctrl-E
+    description: Show klink events
+    scopes:
+      - workloaddependencies
+    command: kubectl
+    background: false
+    args:
+      - get
+      - events
+      - -n
+      - $NAMESPACE
+      - --field-selector
+      - involvedObject.name=$NAME
+      - --sort-by=.lastTimestamp
+
+  klink-logs:
+    shortCut: Ctrl-L
+    description: Klink operator logs
+    scopes:
+      - workloaddependencies
+    command: bash
+    background: false
+    args:
+      - -c
+      - kubectl logs -n klink-system -l app.kubernetes.io/name=klink --tail=100 -f
+
+  klink-show-dependent:
+    shortCut: Ctrl-S
+    description: Show dependent Deployment
+    scopes:
+      - workloaddependencies
+    command: bash
+    background: false
+    args:
+      - -c
+      - |
+        DEP=$(kubectl get workloaddependency $NAME -n $NAMESPACE -o jsonpath='{.spec.dependent.name}')
+        NS=$(kubectl get workloaddependency $NAME -n $NAMESPACE -o jsonpath='{.spec.dependent.namespace}')
+        NS=${NS:-$NAMESPACE}
+        kubectl get deployment $DEP -n $NS -o wide
+
+  klink-force-reconcile:
+    shortCut: Ctrl-F
+    description: Force reconcile
+    scopes:
+      - workloaddependencies
+    command: kubectl
+    background: true
+    args:
+      - annotate
+      - workloaddependency
+      - $NAME
+      - -n
+      - $NAMESPACE
+      - klink.dev/force-reconcile-
+      - --overwrite
