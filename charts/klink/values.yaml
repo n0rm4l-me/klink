@@ -23,6 +23,9 @@ resources:
 leaderElection:
   enabled: true
 
+gateWebhook:
+  enabled: false   # set to true to enable gate mode admission webhook
+
 metrics:
   enabled: false
   port: 8443

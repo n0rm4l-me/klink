@@ -27,14 +27,25 @@ spec:
           args:
             - --health-probe-bind-address=:8081
             - --metrics-bind-address=0
+            - --namespace={{ .Release.Namespace }}
             {{- if .Values.leaderElection.enabled }}
             - --leader-elect
+            {{- end }}
+            {{- if .Values.gateWebhook.enabled }}
+            - --enable-gate-webhook
+            - --gate-webhook-service=klink-webhook
             {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
               drop:
                 - ALL
+          {{- if .Values.gateWebhook.enabled }}
+          ports:
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

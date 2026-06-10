@@ -23,6 +23,16 @@ rules:
 - apiGroups: ["argoproj.io"]
   resources: ["rollouts"]
   verbs: ["get", "list", "watch", "update", "patch"]
+{{- if .Values.gateWebhook.enabled }}
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "create", "update"]
+  resourceNames: ["klink-webhook-tls"]
+- apiGroups: ["admissionregistration.k8s.io"]
+  resources: ["validatingwebhookconfigurations"]
+  verbs: ["get", "patch"]
+  resourceNames: ["klink-gate"]
+{{- end }}
 - apiGroups: [""]
   resources: ["events"]
   verbs: ["create", "patch"]

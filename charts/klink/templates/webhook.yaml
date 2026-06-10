@@ -1,0 +1,59 @@
+{{- if .Values.gateWebhook.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: klink-webhook
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "klink.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "klink.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: 9443
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: klink-gate
+  labels:
+    {{- include "klink.labels" . | nindent 4 }}
+webhooks:
+  - name: gate.klink.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore  # fail open — never block if webhook is down
+    matchPolicy: Equivalent
+    rules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        resources: ["deployments/scale", "statefulsets/scale", "deployments", "statefulsets"]
+        operations: ["UPDATE"]
+        scope: Namespaced
+      - apiGroups: ["argoproj.io"]
+        apiVersions: ["v1alpha1"]
+        resources: ["rollouts"]
+        operations: ["UPDATE"]
+        scope: Namespaced
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        resources: ["cronjobs"]
+        operations: ["UPDATE"]
+        scope: Namespaced
+    clientConfig:
+      service:
+        name: klink-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /validate
+        port: 443
+      # caBundle is patched automatically by the operator at startup
+      caBundle: ""
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: ["kube-system", "klink-system"]
+{{- end }}

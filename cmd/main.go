@@ -37,6 +37,7 @@ import (
 
 	depsv1alpha1 "github.com/n0rm4l-me/klink/api/v1alpha1"
 	"github.com/n0rm4l-me/klink/internal/controller"
+	klinkwebhook "github.com/n0rm4l-me/klink/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -62,6 +63,10 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+	var enableGateWebhook bool
+	var webhookAddr string
+	var webhookSvcName string
+	var operatorNamespace string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -79,6 +84,14 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.BoolVar(&enableGateWebhook, "enable-gate-webhook", false,
+		"Enable the gate mode admission webhook server.")
+	flag.StringVar(&webhookAddr, "gate-webhook-addr", ":9443",
+		"Address for the gate webhook HTTPS server.")
+	flag.StringVar(&webhookSvcName, "gate-webhook-service", "klink-webhook",
+		"Kubernetes Service name for the gate webhook (used in TLS SAN).")
+	flag.StringVar(&operatorNamespace, "namespace", "klink-system",
+		"Namespace where the operator is running (used for TLS secret).")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -187,6 +200,19 @@ func main() {
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
+
+	if enableGateWebhook {
+		tlsMgr := klinkwebhook.NewTLSManager(mgr.GetClient(), operatorNamespace, webhookSvcName)
+		if err := mgr.Add(klinkwebhook.NewWebhookRunnable(
+			tlsMgr,
+			klinkwebhook.NewGateHandler(mgr.GetClient()),
+			webhookAddr,
+		)); err != nil {
+			setupLog.Error(err, "Failed to set up gate webhook")
+			os.Exit(1)
+		}
+		setupLog.Info("Gate webhook enabled", "addr", webhookAddr)
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")
