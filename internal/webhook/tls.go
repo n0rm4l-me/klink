@@ -73,6 +73,12 @@ func (m *TLSManager) EnsureCert(ctx context.Context) ([]byte, []byte, error) {
 		if m.certNeedsRenewal(certPEM) {
 			log.Info("webhook cert expiring soon, rotating")
 		} else {
+			// Cert is valid — patch caBundle on every startup to handle restarts
+			if patchErr := m.patchWebhookCABundle(ctx, certPEM); patchErr != nil {
+				log.Error(patchErr, "failed to patch webhook caBundle on startup")
+			} else {
+				log.Info("webhook caBundle patched on startup")
+			}
 			return certPEM, keyPEM, nil
 		}
 	} else if !errors.IsNotFound(err) {
