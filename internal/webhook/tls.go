@@ -49,12 +49,13 @@ const (
 // the API server trusts the cert.
 type TLSManager struct {
 	client    client.Client
+	reader    client.Reader // direct API reader, bypasses cache — safe to use before cache sync
 	namespace string
 	svcName   string // webhook Service name, e.g. "klink-webhook"
 }
 
-func NewTLSManager(c client.Client, namespace, svcName string) *TLSManager {
-	return &TLSManager{client: c, namespace: namespace, svcName: svcName}
+func NewTLSManager(c client.Client, reader client.Reader, namespace, svcName string) *TLSManager {
+	return &TLSManager{client: c, reader: reader, namespace: namespace, svcName: svcName}
 }
 
 // EnsureCert checks the current cert and rotates if missing or expiring soon.
@@ -63,7 +64,7 @@ func (m *TLSManager) EnsureCert(ctx context.Context) ([]byte, []byte, error) {
 	log := logf.FromContext(ctx)
 
 	secret := &corev1.Secret{}
-	err := m.client.Get(ctx, types.NamespacedName{Name: tlsSecretName, Namespace: m.namespace}, secret)
+	err := m.reader.Get(ctx, types.NamespacedName{Name: tlsSecretName, Namespace: m.namespace}, secret)
 
 	if err == nil {
 		// Secret exists — check expiry
@@ -120,7 +121,7 @@ func (m *TLSManager) EnsureCert(ctx context.Context) ([]byte, []byte, error) {
 // PatchCABundle patches the ValidatingWebhookConfiguration with the current CA cert.
 func (m *TLSManager) PatchCABundle(ctx context.Context) error {
 	secret := &corev1.Secret{}
-	if err := m.client.Get(ctx, types.NamespacedName{Name: tlsSecretName, Namespace: m.namespace}, secret); err != nil {
+	if err := m.reader.Get(ctx, types.NamespacedName{Name: tlsSecretName, Namespace: m.namespace}, secret); err != nil {
 		return err
 	}
 	return m.patchWebhookCABundle(ctx, secret.Data["tls.crt"])
@@ -128,7 +129,7 @@ func (m *TLSManager) PatchCABundle(ctx context.Context) error {
 
 func (m *TLSManager) patchWebhookCABundle(ctx context.Context, caPEM []byte) error {
 	whc := &admissionv1.ValidatingWebhookConfiguration{}
-	if err := m.client.Get(ctx, types.NamespacedName{Name: webhookConfigName}, whc); err != nil {
+	if err := m.reader.Get(ctx, types.NamespacedName{Name: webhookConfigName}, whc); err != nil {
 		if errors.IsNotFound(err) {
 			return nil // webhook not installed yet, skip
 		}

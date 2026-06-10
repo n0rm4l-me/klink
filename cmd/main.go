@@ -220,7 +220,7 @@ func main() {
 	// +kubebuilder:scaffold:builder
 
 	if enableGateWebhook {
-		tlsMgr := klinkwebhook.NewTLSManager(mgr.GetClient(), operatorNamespace, webhookSvcName)
+		tlsMgr := klinkwebhook.NewTLSManager(mgr.GetClient(), mgr.GetAPIReader(), operatorNamespace, webhookSvcName)
 		if err := mgr.Add(klinkwebhook.NewWebhookRunnable(
 			tlsMgr,
 			klinkwebhook.NewGateHandler(mgr.GetClient()),
