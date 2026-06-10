@@ -31,8 +31,8 @@ jobs:
         run: |
           go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1
           controller-gen rbac:roleName=manager-role crd paths="./..." output:crd:artifacts:config=testdata/crd
-          cp testdata/crd/*.yaml charts/klink/templates/crd.yaml
-          git diff --exit-code testdata/crd/ charts/klink/templates/crd.yaml || \
+          cp testdata/crd/deps.klink.dev_workloaddependencies.yaml charts/klink/templates/crd.yaml
+          git diff --exit-code testdata/crd/deps.klink.dev_workloaddependencies.yaml charts/klink/templates/crd.yaml || \
             (echo "CRD manifests are out of date. Run 'make manifests' and commit." && exit 1)
 
       - name: Run tests
