@@ -1,96 +1,197 @@
 # klink
 
-Kubernetes operator for workload dependency management. Automatically scales dependent services to zero when their dependencies become unhealthy, and restores them when dependencies recover.
+**Kubernetes operator for workload dependency management.**
+
+klink automatically scales dependent services to zero when their dependencies become unhealthy — and restores them when dependencies recover. No more zombie services consuming resources and generating errors when their upstream is down.
 
 [![Tests](https://github.com/n0rm4l-me/klink/actions/workflows/test.yml/badge.svg)](https://github.com/n0rm4l-me/klink/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Go Version](https://img.shields.io/badge/go-1.22+-blue.svg)](go.mod)
+
+---
+
+## Why klink?
+
+In microservice architectures, services often have hard runtime dependencies — a payments service that requires a database, a billing job that needs a message queue, a reporting service that depends on an analytics engine. When these dependencies go down, the dependent services keep running, burning CPU and memory, logging errors, and triggering false alerts.
+
+klink solves this by treating workload dependencies as a first-class Kubernetes primitive.
+
+**What klink does:**
+- Automatically suspends dependent workloads when dependencies are unhealthy
+- Restores them automatically when dependencies recover
+- Prevents cascade failure scenarios with configurable hysteresis windows
+- Handles mutual A↔B dependencies without deadlock
+- Supports Deployments, StatefulSets, CronJobs, and Argo Rollouts (with canary-awareness)
+
+---
 
 ## Supported workload types
 
 | Kind | As dependent | As dependency | Notes |
 |------|-------------|--------------|-------|
-| `Deployment` | ✅ scale to 0 | ✅ readyReplicas check | |
-| `StatefulSet` | ✅ scale to 0 | ✅ readyReplicas check | |
-| `CronJob` | ✅ suspend=true | — | no replicas concept |
-| `Rollout` (Argo) | ✅ scale to 0 | ✅ phase check | suspension deferred during active canary |
+| `Deployment` | ✅ scale to 0 / restore | ✅ readyReplicas check | |
+| `StatefulSet` | ✅ scale to 0 / restore | ✅ readyReplicas check | |
+| `CronJob` | ✅ suspend / resume | — | No replicas concept |
+| `Rollout` (Argo) | ✅ scale to 0 / restore | ✅ phase check | Suspension deferred during active canary |
 
-## How it works
+---
+
+## Use cases
+
+### Cascade shutdown on dependency failure
+
+When your database goes down, automatically suspend all services that depend on it — eliminating error storms, resource waste, and misleading alerts.
 
 ```yaml
 apiVersion: deps.klink.dev/v1alpha1
 kind: WorkloadDependency
 metadata:
   name: payments-needs-database
-  namespace: my-app
+  namespace: production
 spec:
   dependent:
-    kind: Rollout        # Deployment | StatefulSet | CronJob | Rollout
-    name: payments
-
+    kind: Deployment
+    name: payments-service
   dependsOn:
     - kind: Deployment
-      name: database
+      name: postgresql
       condition:
-        minReadyPercent: 80   # healthy if ≥80% replicas ready
-        window: 30s            # wait 30s before acting (hysteresis)
-        recoveryWindow: 60s    # wait 60s after recovery before restoring
-
+        minReadyPercent: 80   # tolerate one replica restart
+        window: 30s            # ignore transient failures
+        recoveryWindow: 60s    # wait for stability before restoring
   onDegraded:
     action: ScaleToZero
-
-  mode: strict  # strict | soft | gate
+  mode: strict
 ```
 
-When `database` becomes unhealthy:
-1. klink waits for `window` (hysteresis — ignores transient restarts)
-2. Scales `payments` to 0, saving its replica count
-3. When `database` recovers, waits for `recoveryWindow`, then restores `payments`
+### CronJob gating
 
-**CronJob** dependents: sets `spec.suspend=true` instead of scaling. Resumes on recovery.
+Prevent batch jobs from running when their dependencies are unavailable — no more failed jobs cluttering your history.
 
-**Rollout** dependents: suspension is deferred if a canary/blue-green rollout is in progress — klink never interrupts an active deployment.
+```yaml
+spec:
+  dependent:
+    kind: CronJob
+    name: nightly-billing-export
+  dependsOn:
+    - kind: Deployment
+      name: billing-service
+  mode: soft
+```
+
+When `billing-service` is down, `nightly-billing-export` is automatically suspended (`spec.suspend: true`) and resumed when billing-service recovers.
+
+### Argo Rollout canary awareness
+
+klink is canary-aware. If a dependent Rollout is in the middle of a canary deployment when its dependency goes down, klink **defers** the scale-to-zero until the rollout completes — never interrupting an active deployment.
+
+```yaml
+spec:
+  dependent:
+    kind: Rollout
+    name: payments-service
+  dependsOn:
+    - kind: Rollout
+      name: auth-service
+```
+
+During canary (`status.phase: Progressing`), the stable version keeps serving traffic and klink waits.
+
+### Mutual dependencies without deadlock
+
+Services that depend on each other are handled gracefully. When klink suspends service-A because service-B failed, it marks service-A as `CoSuspended`. Other WDs that depend on service-A see it as intentionally suspended — not a real failure — and don't cascade further.
+
+```
+service-a ←→ service-b (mutual dependency)
+
+service-b fails:
+  → service-a suspended (CoSuspended)
+  → b-needs-a: sees a=CoSuspended, stays Healthy (no deadlock)
+
+You restore service-b manually:
+  → service-a auto-restores ✓
+```
+
+### Gate mode — block scale-up until dependencies are healthy
+
+Prevent operators or HPAs from scaling up a service while its dependencies are down.
+
+```yaml
+spec:
+  mode: gate  # admission webhook blocks scale-up
+```
+
+On supported clusters (not GKE Autopilot), the admission webhook returns HTTP 403 with a clear message:
+
+```
+Error: admission webhook denied the request:
+  klink gate: scale blocked by WorkloadDependency/payments-needs-database
+  — dependency postgresql is not healthy: 0/3 ready (0% < 80%)
+```
+
+### Emergency override
+
+Pause enforcement without deleting the resource — useful during incident response when you need manual control.
+
+```bash
+kubectl annotate workloaddependency payments-needs-database klink.dev/paused=true
+# klink stops all enforcement immediately
+
+kubectl annotate workloaddependency payments-needs-database klink.dev/paused-
+# enforcement resumes
+```
+
+---
+
+## How it works
+
+```
+dependency health:  ████░░░░░░░░░░░░░████████████████████
+                         ↑                  ↑
+                    starts failing      recovers
+
+klink:               wait 30s→ scale to 0   wait 60s→ restore
+                    [Degraded]  [Suspended]  [Suspended]  [Healthy]
+```
+
+1. klink watches for dependency health changes
+2. When a dependency becomes unhealthy, starts the hysteresis `window` timer
+3. If still unhealthy after `window` — scales dependent to 0, saves replica count
+4. When dependency recovers, starts the `recoveryWindow` timer
+5. After `recoveryWindow` — restores exact replica count
+
+---
 
 ## Enforcement modes
 
-| Mode | Behavior |
-|------|----------|
-| `strict` | Re-enforces scale-to-zero on every reconcile while dependency is down. Manual scale-up reverted within 15s. |
-| `soft` | Scales to zero once but does not fight manual changes. |
-| `gate` | Blocks scale-up via admission webhook while dependency is unhealthy. Does not scale to zero. |
+| Mode | On dependency failure | On manual scale-up (while suspended) |
+|------|----------------------|--------------------------------------|
+| `strict` | Scale to 0 after window | Reverts to 0 within 15s |
+| `soft` | Scale to 0 once | Respects manual override |
+| `gate` | No automatic scale | Blocks scale-up via admission webhook |
 
-## Status
+---
+
+## Status phases
 
 ```
 kubectl get workloaddependencies -A
 
-NAMESPACE  NAME                      PHASE       REPLICAS   MESSAGE                               AGE
-my-app     payments-needs-database   Suspended   3          dependency database not healthy        5m
-my-app     billing-needs-database    Suspended              dependency database not healthy         5m
+NAMESPACE    NAME                       PHASE       REPLICAS   MESSAGE                               AGE
+production   payments-needs-database    Suspended   3          dependency postgresql not healthy      5m
+production   billing-needs-database     Suspended              CronJob suspended                     5m
+staging      auth-needs-vault           Healthy                all dependencies healthy              2d
 ```
 
 | Phase | Meaning |
 |-------|---------|
-| `Healthy` | All dependencies healthy |
-| `Degraded` | Dependency unhealthy, within hysteresis window |
-| `Suspended` | Dependent scaled to zero (or CronJob suspended) |
-| `Paused` | Enforcement disabled via `klink.dev/paused` annotation |
+| `Healthy` | All dependencies healthy, workload running normally |
+| `Degraded` | Dependency unhealthy, within hysteresis window — no action yet |
+| `Suspended` | Dependent scaled to 0 (or CronJob suspended) |
+| `Paused` | `klink.dev/paused=true` annotation set |
 | `Unknown` | Dependent workload not found |
 
-## Mutual dependencies
-
-klink handles A→B + B→A without deadlock. When klink scales a service to zero, other `WorkloadDependency` objects that depend on it recognize it as `CoSuspended` and don't cascade.
-
-When you manually restore one service, klink automatically restores the other.
-
-## Pausing
-
-```bash
-# Pause enforcement
-kubectl annotate workloaddependency payments-needs-database klink.dev/paused=true
-
-# Resume
-kubectl annotate workloaddependency payments-needs-database klink.dev/paused-
-```
+---
 
 ## Installation
 
@@ -103,25 +204,24 @@ helm upgrade --install klink oci://ghcr.io/n0rm4l-me/charts/klink \
 Or from source:
 
 ```bash
+git clone https://github.com/n0rm4l-me/klink
 helm upgrade --install klink ./charts/klink \
   --namespace klink-system \
   --create-namespace \
   --set image.tag=0.2.0
 ```
 
-## Metrics
+### Enable gate mode (optional, requires admission webhook support)
 
-klink exposes Prometheus metrics at `:8080/metrics` (enabled by default):
+```bash
+helm upgrade klink ./charts/klink \
+  --namespace klink-system \
+  --set gateWebhook.enabled=true
+```
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `klink_dependency_phase` | Gauge | Current phase per WD (1=active) |
-| `klink_scale_to_zero_total` | Counter | Scale-to-zero actions |
-| `klink_replicas_restored_total` | Counter | Replica restore actions |
-| `klink_reconcile_errors_total` | Counter | Reconciliation errors |
-| `klink_suspended_workloads` | Gauge | Currently suspended workloads |
+> **Note:** Gate mode via admission webhook is not supported on GKE Autopilot clusters (platform limitation). Use `strict` mode instead — it achieves the same result by reverting unauthorized scale-ups within 15 seconds.
 
-GKE Managed Prometheus: `PodMonitoring` resource is created automatically when `metrics.enabled=true`.
+---
 
 ## Configuration reference
 
@@ -138,8 +238,8 @@ spec:
       namespace: string   # optional, cross-namespace supported
       condition:
         minReadyPercent: 100   # 0-100, default 100
-        window: 30s            # default 30s
-        recoveryWindow: 60s    # default 60s
+        window: 30s            # default 30s — ignore transient failures
+        recoveryWindow: 60s    # default 60s — wait for stability
 
   onDegraded:
     action: ScaleToZero
@@ -147,9 +247,27 @@ spec:
   mode: strict | soft | gate   # default strict
 ```
 
+---
+
+## Metrics
+
+klink exposes Prometheus metrics at `:8080/metrics` (enabled by default).
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `klink_dependency_phase{namespace,name,phase}` | Gauge | Current phase (1=active) |
+| `klink_scale_to_zero_total{namespace,kind,name}` | Counter | Scale-to-zero actions |
+| `klink_replicas_restored_total{namespace,kind,name}` | Counter | Replica restore actions |
+| `klink_reconcile_errors_total{namespace,error_type}` | Counter | Reconciliation errors |
+| `klink_suspended_workloads{namespace,kind}` | Gauge | Currently suspended count |
+
+GKE Managed Prometheus: `PodMonitoring` resource created automatically when `metrics.enabled=true`.
+
+---
+
 ## k9s plugins
 
-Copy `contrib/k9s-plugins.yaml` entries into `~/.config/k9s/plugins.yaml`.
+Copy `contrib/k9s-plugins.yaml` into `~/.config/k9s/plugins.yaml` and navigate to `:workloaddependencies` in k9s.
 
 | Shortcut | Action |
 |----------|--------|
@@ -159,39 +277,39 @@ Copy `contrib/k9s-plugins.yaml` entries into `~/.config/k9s/plugins.yaml`.
 | `Ctrl-S` | Show dependent workload |
 | `Ctrl-F` | Force reconcile |
 
+---
+
 ## Documentation
 
-- [Architecture](docs/architecture.md) — component diagram, state machine, sequence diagrams
-- [Core Concepts](docs/concepts.md) — modes, hysteresis, mutual dependencies, Rollout support
-- [Getting Started](docs/getting-started.md) — installation and first WorkloadDependency
-- [API Reference](docs/api-reference.md) — complete CRD spec/status reference
-- [Operations](docs/operations.md) — HA, monitoring, troubleshooting, upgrade guide
+| Document | Description |
+|---------|-------------|
+| [Architecture](docs/architecture.md) | Component diagrams, state machine, sequence diagrams |
+| [Core Concepts](docs/concepts.md) | Modes, hysteresis, mutual deps, Rollout canary behavior |
+| [Getting Started](docs/getting-started.md) | Installation and first WorkloadDependency |
+| [API Reference](docs/api-reference.md) | Complete CRD spec/status reference |
+| [Operations](docs/operations.md) | HA, monitoring, troubleshooting, upgrade guide |
+
+---
 
 ## Development
 
-**Requirements:** Go 1.22+, kubebuilder v4, podman or docker
-
 ```bash
-# Generate CRDs and deepcopy
-make manifests generate
-
 # Run tests (unit + integration)
 make test
 
-# Run e2e tests (requires cluster + klink deployed)
+# Run e2e tests against a real cluster
 make test-e2e
 
 # Build image
 make image-build IMG=your-registry/klink:tag
-
-# Push image
-make image-push IMG=your-registry/klink:tag
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for full development guide.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development guide.
+
+---
 
 ## Roadmap
 
 - Prometheus-based health conditions (`expr: rate(errors[2m]) < 0.01`)
-- Dependency graph visualization and cycle detection
+- Dependency graph visualization with cycle detection
 - DaemonSet support
