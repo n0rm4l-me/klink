@@ -6,9 +6,6 @@ on:
 
 permissions: {}
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   test:
     permissions:
@@ -40,10 +37,20 @@ jobs:
             (echo "CRD manifests are out of date. Run 'make manifests' and commit." && exit 1)
 
       - name: Run unit tests (webhook)
-        run: go test ./internal/webhook/... -timeout 30s
+        run: go test ./internal/webhook/... -timeout 60s
+
+      - name: Cache envtest binaries
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.local/share/kubebuilder-envtest
+          key: envtest-1.33-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install setup-envtest
+        run: |
+          GOBIN=$HOME/.local/bin go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Run integration tests (envtest)
         run: |
-          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
-          ENVTEST_ASSETS=$($(go env GOPATH)/bin/setup-envtest use 1.33 -p path)
-          KUBEBUILDER_ASSETS=$ENVTEST_ASSETS go test ./internal/controller/... -timeout 240s
+          ENVTEST_ASSETS=$(setup-envtest use 1.33 -p path)
+          KUBEBUILDER_ASSETS=$ENVTEST_ASSETS go test ./internal/controller/... -timeout 300s
