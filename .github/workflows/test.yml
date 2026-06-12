@@ -66,8 +66,8 @@ jobs:
           # Unit tests
           echo "### Unit Tests (webhook)" >> $GITHUB_STEP_SUMMARY
           if [ -f /tmp/unit-results.json ]; then
-            PASS=$(grep -c '"Action":"pass"' /tmp/unit-results.json || echo 0)
-            FAIL=$(grep -c '"Action":"fail"' /tmp/unit-results.json || echo 0)
+            PASS=$(grep '"Action":"pass"' /tmp/unit-results.json | grep -c '"Test"' || echo 0)
+            FAIL=$(grep '"Action":"fail"' /tmp/unit-results.json | grep -c '"Test"' || echo 0)
             echo "| Result | Count |" >> $GITHUB_STEP_SUMMARY
             echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
             echo "| ✅ Pass | $PASS |" >> $GITHUB_STEP_SUMMARY
@@ -85,8 +85,8 @@ jobs:
           # Integration tests
           echo "### Integration Tests (envtest)" >> $GITHUB_STEP_SUMMARY
           if [ -f /tmp/integration-results.json ]; then
-            PASS=$(grep -c '"Action":"pass"' /tmp/integration-results.json || echo 0)
-            FAIL=$(grep -c '"Action":"fail"' /tmp/integration-results.json || echo 0)
+            PASS=$(grep '"Action":"pass"' /tmp/integration-results.json | grep -c '"Test"' || echo 0)
+            FAIL=$(grep '"Action":"fail"' /tmp/integration-results.json | grep -c '"Test"' || echo 0)
             echo "| Result | Count |" >> $GITHUB_STEP_SUMMARY
             echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
             echo "| ✅ Pass | $PASS |" >> $GITHUB_STEP_SUMMARY
@@ -108,11 +108,10 @@ jobs:
       - name: Fail if tests failed
         if: always()
         run: |
-          UNIT_FAIL=$(grep -c '"Action":"fail"' /tmp/unit-results.json 2>/dev/null | tr -d '[:space:]' || echo "0")
-          INT_FAIL=$(grep -c '"Action":"fail"' /tmp/integration-results.json 2>/dev/null | tr -d '[:space:]' || echo "0")
-          UNIT_FAIL=${UNIT_FAIL:-0}
-          INT_FAIL=${INT_FAIL:-0}
-          echo "unit failures: $UNIT_FAIL, integration failures: $INT_FAIL"
+          # Count only individual test failures (lines with "Test" field), not package-level failures
+          UNIT_FAIL=$(grep '"Action":"fail"' /tmp/unit-results.json 2>/dev/null | grep -c '"Test"' || echo "0")
+          INT_FAIL=$(grep '"Action":"fail"' /tmp/integration-results.json 2>/dev/null | grep -c '"Test"' || echo "0")
+          echo "unit test failures: ${UNIT_FAIL}, integration test failures: ${INT_FAIL}"
           if [ "${UNIT_FAIL}" -gt "0" ] || [ "${INT_FAIL}" -gt "0" ]; then
             echo "Tests failed: unit=${UNIT_FAIL} integration=${INT_FAIL}"
             exit 1
