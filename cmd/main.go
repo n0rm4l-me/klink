@@ -19,6 +19,8 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"io"
+	stdlog "log"
 	"os"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -106,6 +108,9 @@ func main() {
 	ctrl.SetLogger(logger)
 	// Redirect klog (used by client-go leader election etc.) to zap for consistent JSON output
 	klog.SetLogger(logger)
+	// Suppress stdlib log output — net/http TLS errors go to stderr by default
+	// which breaks JSON log format. They are expected errors (health probes, etc.)
+	stdlog.SetOutput(io.Discard)
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
