@@ -69,8 +69,19 @@ func (r *WorkloadDependencyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return r.handleDeletion(ctx, wd)
 	}
 
-	// Ensure finalizer is present so we can restore replicas on deletion
+	// Ensure finalizer is present so we can restore replicas on deletion.
+	// On first creation also check for dependency cycles.
 	if !controllerutil.ContainsFinalizer(wd, depsv1alpha1.FinalizerName) {
+		// Cycle detection on first admission
+		if cycle, err := DetectCycle(ctx, r.Client, wd); err != nil {
+			log.Error(err, "cycle detection failed, proceeding anyway")
+		} else if cycle != nil {
+			msg := fmt.Sprintf("dependency cycle detected: %s", FormatCycle(cycle))
+			log.Error(nil, msg)
+			r.Recorder.Eventf(wd, corev1.EventTypeWarning, "CycleDetected", msg)
+			return r.setStatus(ctx, wd, depsv1alpha1.PhaseUnknown, msg, &ctrl.Result{})
+		}
+
 		controllerutil.AddFinalizer(wd, depsv1alpha1.FinalizerName)
 		if err := r.Update(ctx, wd); err != nil {
 			return ctrl.Result{}, err
@@ -146,8 +157,17 @@ func (r *WorkloadDependencyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
+	// Observe mode: log what would happen but take no action.
+	if wd.Spec.Mode == depsv1alpha1.ModeObserve {
+		if allOk {
+			return r.setStatus(ctx, wd, depsv1alpha1.PhaseHealthy, "all dependencies healthy (observe mode)", nil)
+		}
+		observeMsg := fmt.Sprintf("observe mode: would scale %s/%s to 0 — %s", wd.Spec.Dependent.Kind, wd.Spec.Dependent.Name, unhealthyMsg)
+		log.Info("observe mode: would act", "action", "ScaleToZero", "dependent", wd.Spec.Dependent.Name, "reason", unhealthyMsg)
+		return r.setStatus(ctx, wd, depsv1alpha1.PhaseObserved, observeMsg, nil)
+	}
+
 	// Gate mode: never scale dependent — only block scale-up via admission webhook.
-	// Just track health status so the webhook can check it.
 	if wd.Spec.Mode == depsv1alpha1.ModeGate {
 		if allOk {
 			return r.setStatus(ctx, wd, depsv1alpha1.PhaseHealthy, "all dependencies healthy", nil)
@@ -155,7 +175,31 @@ func (r *WorkloadDependencyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return r.setStatus(ctx, wd, depsv1alpha1.PhaseDegraded, unhealthyMsg, nil)
 	}
 
+	// maxSuspendDuration: auto-restore if suspended too long, even if dependency still unhealthy.
 	if !allOk && wd.Status.Phase == depsv1alpha1.PhaseSuspended {
+		maxDur := wd.Spec.OnDegraded.MaxSuspendDuration.Duration
+		if maxDur > 0 && wd.Status.SuspendedAt != nil {
+			elapsed := time.Since(wd.Status.SuspendedAt.Time)
+			if elapsed >= maxDur {
+				log.Info("maxSuspendDuration exceeded, restoring despite unhealthy dependency",
+					"dependent", wd.Spec.Dependent.Name,
+					"suspendedFor", elapsed.Round(time.Second),
+					"maxSuspendDuration", maxDur)
+				r.Recorder.Eventf(wd, corev1.EventTypeWarning, "MaxSuspendDurationExceeded",
+					"Restoring %s after %s (maxSuspendDuration exceeded) — dependency still unhealthy",
+					wd.Spec.Dependent.Name, maxDur)
+				// Force immediate restore bypassing recoveryWindow
+				if err := r.restoreWorkload(ctx, wd, dependent); err != nil {
+					return ctrl.Result{}, err
+				}
+				wd.Status.SavedReplicas = nil
+				wd.Status.HealthySince = nil
+				return r.setStatus(ctx, wd, depsv1alpha1.PhaseHealthy, "restored after maxSuspendDuration", nil)
+			}
+			// Requeue precisely when maxSuspendDuration expires
+			remaining := maxDur - elapsed
+			return ctrl.Result{RequeueAfter: remaining + time.Second}, nil
+		}
 		return r.handleSuspended(ctx, wd, dependent, unhealthyMsg)
 	}
 
@@ -605,6 +649,18 @@ func (r *WorkloadDependencyReconciler) setStatus(
 	msg string,
 	result *ctrl.Result,
 ) (ctrl.Result, error) {
+	prevPhase := wd.Status.Phase
+
+	// Track when suspension started for maxSuspendDuration
+	if phase == depsv1alpha1.PhaseSuspended {
+		if wd.Status.SuspendedAt == nil {
+			now := metav1.Now()
+			wd.Status.SuspendedAt = &now
+		}
+	} else {
+		wd.Status.SuspendedAt = nil
+	}
+
 	wd.Status.Phase = phase
 	wd.Status.Message = msg
 	setCondition(wd, phase, msg)
@@ -615,6 +671,11 @@ func (r *WorkloadDependencyReconciler) setStatus(
 	}
 
 	recordPhase(wd.Namespace, wd.Name, string(phase))
+
+	// Send webhook notification on phase transition
+	if prevPhase != phase {
+		maybeNotify(ctx, r.Client, wd, prevPhase, phase)
+	}
 
 	if result != nil {
 		return *result, nil

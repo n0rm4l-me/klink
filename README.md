@@ -169,6 +169,61 @@ klink:               wait 30s→ scale to 0   wait 60s→ restore
 | `strict` | Scale to 0 after window | Reverts to 0 within 15s |
 | `soft` | Scale to 0 once | Respects manual override |
 | `gate` | No automatic scale | Blocks scale-up via admission webhook |
+| `observe` | **Logs only — no action** | N/A — use for onboarding/dry-run |
+
+### Observe mode — safe onboarding
+
+Apply klink to existing services without any risk. Observe mode logs what klink *would* do, but never touches your workloads:
+
+```yaml
+mode: observe
+```
+
+The WD phase becomes `Observed` when klink would have acted. Switch to `strict` or `soft` when you're confident.
+
+### Safety net — maxSuspendDuration
+
+Automatically restore workloads after a maximum suspension time, even if the dependency is still unhealthy:
+
+```yaml
+onDegraded:
+  action: ScaleToZero
+  maxSuspendDuration: 4h  # restore after 4 hours no matter what
+```
+
+Prevents services from being stuck at zero indefinitely due to long-running outages.
+
+### Webhook notifications
+
+Get notified when workloads are suspended or restored:
+
+```yaml
+notify:
+  webhook: https://hooks.slack.com/services/xxx/yyy/zzz
+  onPhases: [Suspended, Healthy]  # optional, defaults to these two
+```
+
+For secrets:
+```yaml
+notify:
+  webhookSecretRef:
+    name: slack-webhook
+    key: url   # Secret key containing the URL
+```
+
+The notification payload:
+```json
+{
+  "workloadDependency": "payments-needs-database",
+  "namespace": "production",
+  "phase": "Suspended",
+  "previousPhase": "Degraded",
+  "dependent": "payments-service",
+  "dependentKind": "Deployment",
+  "message": "dependency postgresql not healthy",
+  "timestamp": "2026-06-12T10:00:00Z"
+}
+```
 
 ---
 
@@ -311,5 +366,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development guide.
 ## Roadmap
 
 - Prometheus-based health conditions (`expr: rate(errors[2m]) < 0.01`)
-- Dependency graph visualization with cycle detection
+- `kubectl klink` plugin — graph visualization, status, why-suspended
 - DaemonSet support

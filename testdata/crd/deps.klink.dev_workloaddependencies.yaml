@@ -49,8 +49,11 @@ spec:
           metadata:
             type: object
           spec:
+            description: WorkloadDependencySpec defines the desired behavior of the
+              dependency relationship.
             properties:
               dependent:
+                description: WorkloadRef identifies a workload in the cluster.
                 properties:
                   kind:
                     enum:
@@ -69,8 +72,11 @@ spec:
                 type: object
               dependsOn:
                 items:
+                  description: DependsOnEntry describes a single dependency to watch.
                   properties:
                     condition:
+                      description: HealthCondition defines thresholds and timing for
+                        dependency health checks.
                       properties:
                         minReadyPercent:
                           default: 100
@@ -108,13 +114,58 @@ spec:
                 - strict
                 - soft
                 - gate
+                - observe
                 type: string
+              notify:
+                description: NotifySpec configures webhook notifications on phase
+                  transitions.
+                properties:
+                  onPhases:
+                    description: |-
+                      OnPhases lists which phase transitions trigger a notification.
+                      Defaults to ["Suspended", "Healthy"] if empty.
+                    items:
+                      enum:
+                      - Healthy
+                      - Degraded
+                      - Suspended
+                      - Paused
+                      - Observed
+                      - Unknown
+                      type: string
+                    type: array
+                  webhook:
+                    description: Webhook is the URL to POST phase change notifications
+                      to.
+                    type: string
+                  webhookSecretRef:
+                    description: |-
+                      WebhookSecretRef references a Secret containing the webhook URL under key "url".
+                      Takes precedence over Webhook if set.
+                    properties:
+                      key:
+                        default: url
+                        type: string
+                      name:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
               onDegraded:
+                description: OnDegradedSpec defines what action to take when a dependency
+                  is unhealthy.
                 properties:
                   action:
                     default: ScaleToZero
                     enum:
                     - ScaleToZero
+                    type: string
+                  maxSuspendDuration:
+                    description: |-
+                      MaxSuspendDuration is the maximum time the dependent workload can remain suspended.
+                      After this duration klink will restore the workload even if the dependency is still unhealthy.
+                      Zero means suspend indefinitely. Example: "4h", "30m".
                     type: string
                 type: object
             required:
@@ -122,6 +173,7 @@ spec:
             - dependsOn
             type: object
           status:
+            description: WorkloadDependencyStatus is the observed state of a WorkloadDependency.
             properties:
               conditions:
                 items:
@@ -202,12 +254,18 @@ spec:
                 - Degraded
                 - Suspended
                 - Paused
+                - Observed
                 - Unknown
                 type: string
               savedReplicas:
                 description: Saved replica count before scale-to-zero, used for restore.
                 format: int32
                 type: integer
+              suspendedAt:
+                description: Timestamp when the dependent workload was suspended (for
+                  maxSuspendDuration).
+                format: date-time
+                type: string
             type: object
         required:
         - spec

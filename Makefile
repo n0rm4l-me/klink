@@ -13,7 +13,7 @@ build:
 
 .PHONY: generate
 generate: controller-gen
-	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt",year=2026 paths="./..."
+	"$(CONTROLLER_GEN)" object paths="./..."
 
 .PHONY: manifests
 manifests: controller-gen
