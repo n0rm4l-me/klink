@@ -1,4 +1,4 @@
-IMG ?= ghcr.io/n0rm4l-me/klink:0.1.0
+IMG ?= ghcr.io/n0rm4l-me/klink:0.2.0
 
 LOCALBIN ?= $(shell pwd)/bin
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
