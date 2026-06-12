@@ -60,6 +60,14 @@ func (h *GateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log := logf.FromContext(ctx)
 
+	// Recover from panics to prevent crashing the webhook server on malformed requests
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Error(fmt.Errorf("panic: %v", rec), "recovered from panic in webhook handler")
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}
+	}()
+
 	log.Info("webhook request received", "path", r.URL.Path, "method", r.Method, "remote", r.RemoteAddr)
 
 	body, err := io.ReadAll(r.Body)

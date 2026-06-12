@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"time"
 
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -69,7 +70,10 @@ func (w *WebhookRunnable) Start(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		_ = srv.Shutdown(context.Background()) //nolint:contextcheck
+		// Use a timeout for graceful shutdown so pod termination doesn't hang
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
 	}()
 
 	log.Info("starting gate webhook server", "addr", w.addr)

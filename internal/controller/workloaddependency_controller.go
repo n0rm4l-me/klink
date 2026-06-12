@@ -32,6 +32,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -63,6 +64,21 @@ func (r *WorkloadDependencyReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	log.Info("reconciling", "phase", wd.Status.Phase, "mode", wd.Spec.Mode)
 
+	// Handle deletion: restore replicas before allowing finalizer removal
+	if !wd.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, wd)
+	}
+
+	// Ensure finalizer is present so we can restore replicas on deletion
+	if !controllerutil.ContainsFinalizer(wd, depsv1alpha1.FinalizerName) {
+		controllerutil.AddFinalizer(wd, depsv1alpha1.FinalizerName)
+		if err := r.Update(ctx, wd); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// nil-safe annotation check
 	if wd.Annotations[depsv1alpha1.AnnotationPaused] == "true" {
 		return r.setStatus(ctx, wd, depsv1alpha1.PhasePaused, "manually paused via klink.dev/paused annotation", nil)
 	}
@@ -147,6 +163,33 @@ func (r *WorkloadDependencyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return r.handleHealthy(ctx, wd, dependent, now)
 	}
 	return r.handleDegraded(ctx, wd, dependent, unhealthyMsg, now)
+}
+
+// handleDeletion restores workload replicas when a WorkloadDependency is deleted while
+// its dependent is suspended. This prevents workloads from being stuck at 0 replicas forever.
+func (r *WorkloadDependencyReconciler) handleDeletion(ctx context.Context, wd *depsv1alpha1.WorkloadDependency) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	if wd.Status.Phase == depsv1alpha1.PhaseSuspended && wd.Status.SavedReplicas != nil && *wd.Status.SavedReplicas > 0 {
+		dependentNS := wd.Spec.Dependent.Namespace
+		if dependentNS == "" {
+			dependentNS = wd.Namespace
+		}
+		dependent, err := r.getWorkload(ctx, wd.Spec.Dependent.Kind, wd.Spec.Dependent.Name, dependentNS)
+		if err == nil {
+			if restoreErr := r.restoreWorkload(ctx, wd, dependent); restoreErr != nil {
+				log.Error(restoreErr, "failed to restore replicas on deletion, retrying")
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			}
+			log.Info("restored replicas before deletion", "dependent", wd.Spec.Dependent.Name)
+		}
+	}
+
+	controllerutil.RemoveFinalizer(wd, depsv1alpha1.FinalizerName)
+	if err := r.Update(ctx, wd); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
 }
 
 // workloadAccessor abstracts Deployment / StatefulSet / CronJob behind a common interface.

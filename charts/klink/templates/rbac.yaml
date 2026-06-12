@@ -24,9 +24,6 @@ rules:
   resources: ["rollouts"]
   verbs: ["get", "list", "watch", "update", "patch"]
 {{- if .Values.gateWebhook.enabled }}
-- apiGroups: [""]
-  resources: ["secrets"]
-  verbs: ["get", "list", "watch", "create", "update"]
 - apiGroups: ["admissionregistration.k8s.io"]
   resources: ["validatingwebhookconfigurations"]
   verbs: ["get", "patch"]
@@ -39,6 +36,41 @@ rules:
 - apiGroups: ["coordination.k8s.io"]
   resources: ["leases"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+{{- end }}
+{{- if .Values.gateWebhook.enabled }}
+---
+# Namespaced Role for TLS secret — more restrictive than ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "klink.fullname" . }}-webhook-secret
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "klink.labels" . | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch", "create", "update"]
+  resourceNames: ["klink-webhook-tls"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "klink.fullname" . }}-webhook-secret
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "klink.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "klink.fullname" . }}-webhook-secret
+subjects:
+- kind: ServiceAccount
+  name: {{ include "klink.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
 {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

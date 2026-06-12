@@ -78,7 +78,13 @@ const (
 	ModeGate EnforcementMode = "gate"
 )
 
-const AnnotationPaused = "klink.dev/paused"
+const (
+	// AnnotationPaused suspends all klink enforcement on this WorkloadDependency.
+	AnnotationPaused = "klink.dev/paused"
+
+	// FinalizerName ensures replicas are restored before a WorkloadDependency is deleted.
+	FinalizerName = "klink.dev/finalizer"
+)
 
 type WorkloadDependencySpec struct {
 	Dependent  WorkloadRef      `json:"dependent"`

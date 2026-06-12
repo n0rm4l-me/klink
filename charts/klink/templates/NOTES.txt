@@ -1,0 +1,36 @@
+klink has been deployed to {{ .Release.Namespace }}.
+
+Create your first WorkloadDependency:
+
+  kubectl apply -f - <<EOF
+  apiVersion: deps.klink.dev/v1alpha1
+  kind: WorkloadDependency
+  metadata:
+    name: payments-needs-database
+    namespace: default
+  spec:
+    dependent:
+      kind: Deployment       # Deployment | StatefulSet | CronJob | Rollout
+      name: payments
+    dependsOn:
+      - kind: Deployment
+        name: database
+        condition:
+          minReadyPercent: 80
+          window: 30s
+          recoveryWindow: 60s
+    onDegraded:
+      action: ScaleToZero
+    mode: strict             # strict | soft | gate
+  EOF
+
+Check status:
+  kubectl get workloaddependencies -A
+
+Pause enforcement:
+  kubectl annotate workloaddependency payments-needs-database klink.dev/paused=true
+
+Operator logs:
+  kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/name=klink -f
+
+Documentation: https://github.com/n0rm4l-me/klink/tree/main/docs

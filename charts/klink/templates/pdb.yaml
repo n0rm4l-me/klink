@@ -1,0 +1,14 @@
+{{- if gt (int .Values.replicaCount) 1 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "klink.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "klink.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "klink.selectorLabels" . | nindent 6 }}
+{{- end }}
