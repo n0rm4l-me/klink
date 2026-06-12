@@ -16,8 +16,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
       - uses: actions/setup-go@v5
+        env:
+          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
           go-version-file: go.mod
           cache: true
@@ -104,9 +108,12 @@ jobs:
       - name: Fail if tests failed
         if: always()
         run: |
-          UNIT_FAIL=$(grep -c '"Action":"fail"' /tmp/unit-results.json 2>/dev/null || echo 0)
-          INT_FAIL=$(grep -c '"Action":"fail"' /tmp/integration-results.json 2>/dev/null || echo 0)
-          if [ "$UNIT_FAIL" -gt "0" ] || [ "$INT_FAIL" -gt "0" ]; then
-            echo "Tests failed: unit=$UNIT_FAIL integration=$INT_FAIL"
+          UNIT_FAIL=$(grep -c '"Action":"fail"' /tmp/unit-results.json 2>/dev/null | tr -d '[:space:]' || echo "0")
+          INT_FAIL=$(grep -c '"Action":"fail"' /tmp/integration-results.json 2>/dev/null | tr -d '[:space:]' || echo "0")
+          UNIT_FAIL=${UNIT_FAIL:-0}
+          INT_FAIL=${INT_FAIL:-0}
+          echo "unit failures: $UNIT_FAIL, integration failures: $INT_FAIL"
+          if [ "${UNIT_FAIL}" -gt "0" ] || [ "${INT_FAIL}" -gt "0" ]; then
+            echo "Tests failed: unit=${UNIT_FAIL} integration=${INT_FAIL}"
             exit 1
           fi
