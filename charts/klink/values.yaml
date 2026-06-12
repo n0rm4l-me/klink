@@ -27,8 +27,8 @@ gateWebhook:
   enabled: false   # set to true to enable gate mode admission webhook
 
 metrics:
-  enabled: false
-  port: 8443
+  enabled: true
+  port: 8080     # plain HTTP metrics endpoint for Prometheus scraping
 
 nodeSelector: {}
 tolerations: []

@@ -35,7 +35,10 @@ jobs:
           git diff --exit-code testdata/crd/deps.klink.dev_workloaddependencies.yaml charts/klink/templates/crd.yaml || \
             (echo "CRD manifests are out of date. Run 'make manifests' and commit." && exit 1)
 
-      - name: Run tests
+      - name: Run unit tests (webhook, no cluster)
+        run: go test ./internal/webhook/... -timeout 30s
+
+      - name: Run integration tests (envtest)
         run: |
           go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
           ENVTEST_ASSETS=$(setup-envtest use 1.33 -p path)

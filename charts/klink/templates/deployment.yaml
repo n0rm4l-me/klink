@@ -30,7 +30,7 @@ spec:
             - /manager
           args:
             - --health-probe-bind-address=:8081
-            - --metrics-bind-address=0
+            - --metrics-bind-address={{ if .Values.metrics.enabled }}:{{ .Values.metrics.port }}{{ else }}0{{ end }}
             - --namespace={{ .Release.Namespace }}
             {{- if .Values.leaderElection.enabled }}
             - --leader-elect
@@ -45,12 +45,17 @@ spec:
             capabilities:
               drop:
                 - ALL
-          {{- if .Values.gateWebhook.enabled }}
           ports:
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.gateWebhook.enabled }}
             - name: webhook
               containerPort: 9443
               protocol: TCP
-          {{- end }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

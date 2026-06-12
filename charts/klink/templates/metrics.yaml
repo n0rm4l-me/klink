@@ -1,0 +1,36 @@
+{{- if .Values.metrics.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "klink.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "klink.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "klink.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+---
+# PodMonitoring for GKE Managed Prometheus (Google Cloud Managed Service for Prometheus)
+# Requires: https://cloud.google.com/stackdriver/docs/managed-prometheus
+apiVersion: monitoring.googleapis.com/v1
+kind: PodMonitoring
+metadata:
+  name: {{ include "klink.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "klink.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "klink.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+{{- end }}

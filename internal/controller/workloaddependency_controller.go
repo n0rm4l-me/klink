@@ -328,20 +328,16 @@ func (r *WorkloadDependencyReconciler) depStatus(ctx context.Context, w workload
 	return depUnhealthy, nil
 }
 
+// isSuspendedByKlink returns true if any Suspended WorkloadDependency has this workload
+// as its dependent — meaning klink itself scaled it to zero.
+// Uses a field index for O(1) lookup instead of cluster-wide List().
 func (r *WorkloadDependencyReconciler) isSuspendedByKlink(ctx context.Context, name, ns string) (bool, error) {
 	wdList := &depsv1alpha1.WorkloadDependencyList{}
-	if err := r.List(ctx, wdList); err != nil {
+	if err := r.List(ctx, wdList, client.MatchingFields{indexDependentName: ns + "/" + name}); err != nil {
 		return false, err
 	}
 	for _, wd := range wdList.Items {
-		if wd.Status.Phase != depsv1alpha1.PhaseSuspended {
-			continue
-		}
-		depNS := wd.Spec.Dependent.Namespace
-		if depNS == "" {
-			depNS = wd.Namespace
-		}
-		if wd.Spec.Dependent.Name == name && depNS == ns {
+		if wd.Status.Phase == depsv1alpha1.PhaseSuspended {
 			return true, nil
 		}
 	}
@@ -473,6 +469,7 @@ func (r *WorkloadDependencyReconciler) suspendWorkload(
 		log.Info("suspended cronjob", "name", obj.GetName())
 		r.Recorder.Eventf(wd, corev1.EventTypeWarning, "CronJobSuspended",
 			"Suspended CronJob %s: %s", obj.GetName(), msg)
+		recordScaleToZero(wd.Namespace, "CronJob", obj.GetName())
 
 	case *deploymentAccessor:
 		replicas := obj.getReplicas()
@@ -489,6 +486,7 @@ func (r *WorkloadDependencyReconciler) suspendWorkload(
 		log.Info("scaled dependent to zero", "name", obj.GetName(), "savedReplicas", saved)
 		r.Recorder.Eventf(wd, corev1.EventTypeWarning, "ScaledToZero",
 			"Scaled %s %s to 0 (saved %d replicas): %s", wd.Spec.Dependent.Kind, obj.GetName(), saved, msg)
+		recordScaleToZero(wd.Namespace, "Deployment", obj.GetName())
 
 	case *statefulSetAccessor:
 		replicas := obj.getReplicas()
@@ -505,6 +503,7 @@ func (r *WorkloadDependencyReconciler) suspendWorkload(
 		log.Info("scaled dependent to zero", "name", obj.GetName(), "savedReplicas", saved)
 		r.Recorder.Eventf(wd, corev1.EventTypeWarning, "ScaledToZero",
 			"Scaled %s %s to 0 (saved %d replicas): %s", wd.Spec.Dependent.Kind, obj.GetName(), saved, msg)
+		recordScaleToZero(wd.Namespace, "StatefulSet", obj.GetName())
 
 	case *rolloutAccessor:
 		replicas := obj.getReplicas()
@@ -521,6 +520,7 @@ func (r *WorkloadDependencyReconciler) suspendWorkload(
 		log.Info("scaled rollout to zero", "name", obj.GetName(), "savedReplicas", saved)
 		r.Recorder.Eventf(wd, corev1.EventTypeWarning, "ScaledToZero",
 			"Scaled Rollout %s to 0 (saved %d replicas): %s", obj.GetName(), saved, msg)
+		recordScaleToZero(wd.Namespace, "Rollout", obj.GetName())
 	}
 
 	return nil
@@ -547,6 +547,7 @@ func (r *WorkloadDependencyReconciler) restoreWorkload(
 		log.Info("unsuspended cronjob", "name", obj.GetName())
 		r.Recorder.Eventf(wd, corev1.EventTypeNormal, "CronJobResumed",
 			"Resumed CronJob %s after dependency recovery", obj.GetName())
+		recordReplicasRestored(wd.Namespace, "CronJob", obj.GetName())
 
 	case *deploymentAccessor:
 		if wd.Status.SavedReplicas == nil || *wd.Status.SavedReplicas == 0 {
@@ -561,6 +562,7 @@ func (r *WorkloadDependencyReconciler) restoreWorkload(
 		log.Info("restored dependent replicas", "name", obj.GetName(), "replicas", replicas)
 		r.Recorder.Eventf(wd, corev1.EventTypeNormal, "ReplicasRestored",
 			"Restored %s %s to %d replicas after dependency recovery", wd.Spec.Dependent.Kind, obj.GetName(), replicas)
+		recordReplicasRestored(wd.Namespace, "Deployment", obj.GetName())
 
 	case *statefulSetAccessor:
 		if wd.Status.SavedReplicas == nil || *wd.Status.SavedReplicas == 0 {
@@ -575,6 +577,7 @@ func (r *WorkloadDependencyReconciler) restoreWorkload(
 		log.Info("restored dependent replicas", "name", obj.GetName(), "replicas", replicas)
 		r.Recorder.Eventf(wd, corev1.EventTypeNormal, "ReplicasRestored",
 			"Restored %s %s to %d replicas after dependency recovery", wd.Spec.Dependent.Kind, obj.GetName(), replicas)
+		recordReplicasRestored(wd.Namespace, "StatefulSet", obj.GetName())
 
 	case *rolloutAccessor:
 		if wd.Status.SavedReplicas == nil || *wd.Status.SavedReplicas == 0 {
@@ -589,6 +592,7 @@ func (r *WorkloadDependencyReconciler) restoreWorkload(
 		log.Info("restored rollout replicas", "name", obj.GetName(), "replicas", replicas)
 		r.Recorder.Eventf(wd, corev1.EventTypeNormal, "ReplicasRestored",
 			"Restored Rollout %s to %d replicas after dependency recovery", obj.GetName(), replicas)
+		recordReplicasRestored(wd.Namespace, "Rollout", obj.GetName())
 	}
 
 	return nil
@@ -603,15 +607,77 @@ func (r *WorkloadDependencyReconciler) setStatus(
 ) (ctrl.Result, error) {
 	wd.Status.Phase = phase
 	wd.Status.Message = msg
+	setCondition(wd, phase, msg)
 
 	if err := r.Status().Update(ctx, wd); err != nil {
+		recordReconcileError(wd.Namespace, "status_update")
 		return ctrl.Result{}, err
 	}
+
+	recordPhase(wd.Namespace, wd.Name, string(phase))
 
 	if result != nil {
 		return *result, nil
 	}
 	return ctrl.Result{RequeueAfter: 15 * time.Second}, nil
+}
+
+// setCondition updates the standard status.conditions[] array to reflect the current phase.
+// Follows the Kubernetes API conventions for condition management.
+func setCondition(wd *depsv1alpha1.WorkloadDependency, phase depsv1alpha1.DependencyPhase, msg string) {
+	now := metav1.Now()
+
+	// Map phase to condition type/status/reason
+	type condSpec struct {
+		condType string
+		status   metav1.ConditionStatus
+		reason   string
+	}
+
+	specs := map[depsv1alpha1.DependencyPhase]condSpec{
+		depsv1alpha1.PhaseHealthy:   {"Ready", metav1.ConditionTrue, "DependenciesHealthy"},
+		depsv1alpha1.PhaseDegraded:  {"Ready", metav1.ConditionFalse, "DependencyDegraded"},
+		depsv1alpha1.PhaseSuspended: {"Ready", metav1.ConditionFalse, "DependentSuspended"},
+		depsv1alpha1.PhasePaused:    {"Ready", metav1.ConditionUnknown, "Paused"},
+		depsv1alpha1.PhaseUnknown:   {"Ready", metav1.ConditionUnknown, "DependentNotFound"},
+	}
+
+	spec, ok := specs[phase]
+	if !ok {
+		return
+	}
+
+	// Find existing condition
+	for i, c := range wd.Status.Conditions {
+		if c.Type == spec.condType {
+			if c.Status == spec.status && c.Reason == spec.reason {
+				// No transition — just update message and observed generation
+				wd.Status.Conditions[i].Message = msg
+				wd.Status.Conditions[i].ObservedGeneration = wd.Generation
+				return
+			}
+			// Transition — update all fields
+			wd.Status.Conditions[i] = metav1.Condition{
+				Type:               spec.condType,
+				Status:             spec.status,
+				Reason:             spec.reason,
+				Message:            msg,
+				LastTransitionTime: now,
+				ObservedGeneration: wd.Generation,
+			}
+			return
+		}
+	}
+
+	// Add new condition
+	wd.Status.Conditions = append(wd.Status.Conditions, metav1.Condition{
+		Type:               spec.condType,
+		Status:             spec.status,
+		Reason:             spec.reason,
+		Message:            msg,
+		LastTransitionTime: now,
+		ObservedGeneration: wd.Generation,
+	})
 }
 
 func degradedWindow(wd *depsv1alpha1.WorkloadDependency) time.Duration {
@@ -632,8 +698,29 @@ func recoveryWindow(wd *depsv1alpha1.WorkloadDependency) time.Duration {
 	return 60 * time.Second
 }
 
+// indexDependentName is the field index key for WD.spec.dependent.name + namespace.
+const indexDependentName = ".spec.dependent.namespacedName"
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *WorkloadDependencyReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Index WorkloadDependency by dependent workload name+namespace for efficient
+	// isSuspendedByKlink lookups — replaces cluster-wide List() O(n) scan.
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&depsv1alpha1.WorkloadDependency{},
+		indexDependentName,
+		func(obj client.Object) []string {
+			wd := obj.(*depsv1alpha1.WorkloadDependency)
+			ns := wd.Spec.Dependent.Namespace
+			if ns == "" {
+				ns = wd.Namespace
+			}
+			return []string{ns + "/" + wd.Spec.Dependent.Name}
+		},
+	); err != nil {
+		return fmt.Errorf("register field index %s: %w", indexDependentName, err)
+	}
+
 	rolloutObj := &unstructured.Unstructured{}
 	rolloutObj.SetGroupVersionKind(rolloutGVK)
 

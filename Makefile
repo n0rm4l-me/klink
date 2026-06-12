@@ -23,7 +23,12 @@ manifests: controller-gen
 .PHONY: test
 test:
 	KUBEBUILDER_ASSETS=$(shell $(LOCALBIN)/setup-envtest use 1.33 --bin-dir $(LOCALBIN)/k8s -p path) \
-		go test ./internal/controller/... -timeout 120s
+		go test ./internal/... -timeout 120s
+
+# Run e2e tests against a real cluster (requires kubectl context + klink deployed)
+.PHONY: test-e2e
+test-e2e:
+	go test ./test/e2e/... -v -timeout 10m
 
 .PHONY: fmt
 fmt:
