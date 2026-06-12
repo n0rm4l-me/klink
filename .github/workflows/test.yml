@@ -44,6 +44,6 @@ jobs:
 
       - name: Run integration tests (envtest)
         run: |
-          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.20.4
-          ENVTEST_ASSETS=$(setup-envtest use 1.33 -p path)
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+          ENVTEST_ASSETS=$($(go env GOPATH)/bin/setup-envtest use 1.33 -p path)
           KUBEBUILDER_ASSETS=$ENVTEST_ASSETS go test ./internal/controller/... -timeout 120s
