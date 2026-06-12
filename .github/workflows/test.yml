@@ -6,6 +6,9 @@ on:
 
 permissions: {}
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   test:
     permissions:
@@ -16,26 +19,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-        env:
-          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
       - uses: actions/setup-go@v5
-        env:
-          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Build
-        id: build
         run: go build ./...
 
       - name: Vet
-        id: vet
         run: go vet ./...
 
       - name: Check manifests are up to date
-        id: manifests
         run: |
           go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.20.1
           controller-gen rbac:roleName=manager-role crd paths="./..." output:crd:artifacts:config=testdata/crd
@@ -44,75 +40,10 @@ jobs:
             (echo "CRD manifests are out of date. Run 'make manifests' and commit." && exit 1)
 
       - name: Run unit tests (webhook)
-        id: unit_tests
-        run: go test ./internal/webhook/... -timeout 30s -v -json > /tmp/unit-results.json 2>&1; echo "exit=$?" >> $GITHUB_OUTPUT
-        continue-on-error: true
+        run: go test ./internal/webhook/... -timeout 30s
 
       - name: Run integration tests (envtest)
-        id: integration_tests
         run: |
-          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+          go install sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.19.0
           ENVTEST_ASSETS=$(setup-envtest use 1.33 -p path)
-          KUBEBUILDER_ASSETS=$ENVTEST_ASSETS go test ./internal/controller/... -timeout 120s -v -json > /tmp/integration-results.json 2>&1
-          echo "exit=$?" >> $GITHUB_OUTPUT
-        continue-on-error: true
-
-      - name: Publish test report
-        if: always()
-        run: |
-          echo "## Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Unit tests
-          echo "### Unit Tests (webhook)" >> $GITHUB_STEP_SUMMARY
-          if [ -f /tmp/unit-results.json ]; then
-            PASS=$(grep '"Action":"pass"' /tmp/unit-results.json | grep -c '"Test"' || echo 0)
-            FAIL=$(grep '"Action":"fail"' /tmp/unit-results.json | grep -c '"Test"' || echo 0)
-            echo "| Result | Count |" >> $GITHUB_STEP_SUMMARY
-            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-            echo "| ✅ Pass | $PASS |" >> $GITHUB_STEP_SUMMARY
-            echo "| ❌ Fail | $FAIL |" >> $GITHUB_STEP_SUMMARY
-            if [ "$FAIL" -gt "0" ]; then
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "**Failed tests:**" >> $GITHUB_STEP_SUMMARY
-              grep '"Action":"fail"' /tmp/unit-results.json | grep '"Test"' | \
-                python3 -c "import sys,json; [print('- ' + json.loads(l).get('Test','')) for l in sys.stdin if json.loads(l).get('Test')]" >> $GITHUB_STEP_SUMMARY || true
-            fi
-          fi
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-
-          # Integration tests
-          echo "### Integration Tests (envtest)" >> $GITHUB_STEP_SUMMARY
-          if [ -f /tmp/integration-results.json ]; then
-            PASS=$(grep '"Action":"pass"' /tmp/integration-results.json | grep -c '"Test"' || echo 0)
-            FAIL=$(grep '"Action":"fail"' /tmp/integration-results.json | grep -c '"Test"' || echo 0)
-            echo "| Result | Count |" >> $GITHUB_STEP_SUMMARY
-            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
-            echo "| ✅ Pass | $PASS |" >> $GITHUB_STEP_SUMMARY
-            echo "| ❌ Fail | $FAIL |" >> $GITHUB_STEP_SUMMARY
-            if [ "$FAIL" -gt "0" ]; then
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "**Failed tests:**" >> $GITHUB_STEP_SUMMARY
-              grep '"Action":"fail"' /tmp/integration-results.json | grep '"Test"' | \
-                python3 -c "import sys,json; [print('- ' + json.loads(l).get('Test','')) for l in sys.stdin if json.loads(l).get('Test')]" >> $GITHUB_STEP_SUMMARY || true
-            fi
-          fi
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Build Info" >> $GITHUB_STEP_SUMMARY
-          echo "- Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Branch: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Go version: \`$(go version)\`" >> $GITHUB_STEP_SUMMARY
-
-      - name: Fail if tests failed
-        if: always()
-        run: |
-          # Count only individual test failures (lines with "Test" field), not package-level failures
-          UNIT_FAIL=$(grep '"Action":"fail"' /tmp/unit-results.json 2>/dev/null | grep -c '"Test"' || echo "0")
-          INT_FAIL=$(grep '"Action":"fail"' /tmp/integration-results.json 2>/dev/null | grep -c '"Test"' || echo "0")
-          echo "unit test failures: ${UNIT_FAIL}, integration test failures: ${INT_FAIL}"
-          if [ "${UNIT_FAIL}" -gt "0" ] || [ "${INT_FAIL}" -gt "0" ]; then
-            echo "Tests failed: unit=${UNIT_FAIL} integration=${INT_FAIL}"
-            exit 1
-          fi
+          KUBEBUILDER_ASSETS=$ENVTEST_ASSETS go test ./internal/controller/... -timeout 120s
