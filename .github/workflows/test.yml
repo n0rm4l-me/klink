@@ -14,6 +14,7 @@ jobs:
     permissions:
       contents: read
       checks: write
+      security-events: write  # for anchore scan-action to upload results
     name: Build, vet and test
     runs-on: ubuntu-latest
     steps:
@@ -77,3 +78,33 @@ jobs:
           check_name: Test Results
           include_passed: true
           detailed_summary: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image for scanning (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: klink:scan
+          build-args: TARGETOS=linux
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: klink:scan
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: true
+          artifact-name: sbom-${{ github.sha }}.spdx.json
+
+      - name: Scan SBOM for vulnerabilities
+        uses: anchore/scan-action@v5
+        with:
+          sbom: sbom.spdx.json
+          fail-build: true
+          severity-cutoff: critical
+          output-format: table
