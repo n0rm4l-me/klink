@@ -38,10 +38,11 @@ import (
 )
 
 const (
-	certRenewBefore    = 30 * 24 * time.Hour // renew 30 days before expiry
-	certValidity       = 365 * 24 * time.Hour
-	tlsSecretName      = "klink-webhook-tls"
-	webhookConfigName  = "klink-gate"
+	certRenewBefore   = 30 * 24 * time.Hour // renew 30 days before expiry
+	certValidity      = 365 * 24 * time.Hour
+	tlsSecretName     = "klink-webhook-tls"
+	webhookConfigName = "klink-gate"
+	wdValidatorName   = "klink-wd-validator"
 )
 
 // TLSManager generates and rotates the self-signed TLS certificate used by the
@@ -134,19 +135,23 @@ func (m *TLSManager) PatchCABundle(ctx context.Context) error {
 }
 
 func (m *TLSManager) patchWebhookCABundle(ctx context.Context, caPEM []byte) error {
-	whc := &admissionv1.ValidatingWebhookConfiguration{}
-	if err := m.reader.Get(ctx, types.NamespacedName{Name: webhookConfigName}, whc); err != nil {
-		if errors.IsNotFound(err) {
-			return nil // webhook not installed yet, skip
+	for _, name := range []string{webhookConfigName, wdValidatorName} {
+		whc := &admissionv1.ValidatingWebhookConfiguration{}
+		if err := m.reader.Get(ctx, types.NamespacedName{Name: name}, whc); err != nil {
+			if errors.IsNotFound(err) {
+				continue // not installed yet, skip
+			}
+			return err
 		}
-		return err
+		patch := client.MergeFrom(whc.DeepCopy())
+		for i := range whc.Webhooks {
+			whc.Webhooks[i].ClientConfig.CABundle = caPEM
+		}
+		if err := m.client.Patch(ctx, whc, patch); err != nil {
+			return err
+		}
 	}
-
-	patch := client.MergeFrom(whc.DeepCopy())
-	for i := range whc.Webhooks {
-		whc.Webhooks[i].ClientConfig.CABundle = caPEM
-	}
-	return m.client.Patch(ctx, whc, patch)
+	return nil
 }
 
 func (m *TLSManager) certNeedsRenewal(certPEM []byte) bool {

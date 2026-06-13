@@ -107,6 +107,9 @@ func resolveWebhookURL(ctx context.Context, c client.Client, wd *depsv1alpha1.Wo
 	return wd.Spec.Notify.Webhook, nil
 }
 
+// notifyMaxRetries is the number of delivery attempts before giving up.
+const notifyMaxRetries = 3
+
 func sendNotification(ctx context.Context, url string, payload notifyPayload) {
 	log := logf.FromContext(ctx)
 
@@ -116,27 +119,49 @@ func sendNotification(ctx context.Context, url string, payload notifyPayload) {
 		return
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		log.Error(err, "failed to create notification request")
+	// Retry with exponential backoff: 1s, 2s, 4s
+	var lastErr error
+	for attempt := 0; attempt < notifyMaxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<(attempt-1)) * time.Second
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			log.Error(err, "failed to create notification request")
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "klink-operator/"+version())
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		_ = resp.Body.Close()
+
+		if resp.StatusCode >= 500 {
+			// Server error — retry
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+			continue
+		}
+		if resp.StatusCode >= 400 {
+			// Client error — don't retry, the request is bad
+			log.Error(fmt.Errorf("HTTP %d", resp.StatusCode), "notification webhook rejected request", "url", url)
+			return
+		}
+
+		log.Info("notification sent", "url", url, "phase", payload.Phase, "status", resp.StatusCode, "attempt", attempt+1)
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "klink-operator/"+version())
 
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		log.Error(err, "failed to send notification", "url", url)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		log.Error(fmt.Errorf("HTTP %d", resp.StatusCode), "notification webhook returned error", "url", url)
-		return
-	}
-
-	log.Info("notification sent", "url", url, "phase", payload.Phase, "status", resp.StatusCode)
+	log.Error(lastErr, "notification failed after retries", "url", url, "attempts", notifyMaxRetries)
 }
 
 func version() string {

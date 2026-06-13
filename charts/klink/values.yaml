@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: ghcr.io/n0rm4l-me/klink
-  pullPolicy: Always
+  pullPolicy: IfNotPresent
   tag: ""  # defaults to Chart.appVersion
 
 imagePullSecrets: []
@@ -22,6 +22,10 @@ resources:
 
 leaderElection:
   enabled: true
+
+# watchNamespace restricts the operator to a single namespace (multi-tenancy).
+# Empty string means watch all namespaces (cluster-wide, default).
+watchNamespace: ""
 
 gateWebhook:
   enabled: false   # set to true to enable gate mode admission webhook

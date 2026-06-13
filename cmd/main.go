@@ -73,6 +73,7 @@ func main() {
 	var webhookAddr string
 	var webhookSvcName string
 	var operatorNamespace string
+	var watchNamespace string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -98,6 +99,8 @@ func main() {
 		"Kubernetes Service name for the gate webhook (used in TLS SAN).")
 	flag.StringVar(&operatorNamespace, "namespace", "klink-system",
 		"Namespace where the operator is running (used for TLS secret).")
+	flag.StringVar(&watchNamespace, "watch-namespace", "",
+		"If set, the operator only watches WorkloadDependencies in this namespace (single-namespace mode for multi-tenancy). Empty means all namespaces.")
 	opts := zap.Options{
 		Development: false,
 	}
@@ -179,6 +182,24 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
+	cacheOpts := cache.Options{
+		// Don't cache Secrets cluster-wide — operator only reads/writes one specific Secret.
+		ByObject: map[client.Object]cache.ByObject{
+			&corev1.Secret{}: {
+				Namespaces: map[string]cache.Config{
+					operatorNamespace: {},
+				},
+			},
+		},
+	}
+	// Single-namespace mode: restrict the cache to one namespace for multi-tenancy.
+	if watchNamespace != "" {
+		setupLog.Info("Restricting to single namespace", "namespace", watchNamespace)
+		cacheOpts.DefaultNamespaces = map[string]cache.Config{
+			watchNamespace: {},
+		}
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -186,17 +207,7 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "34fd0290.klink.dev",
-		Cache: cache.Options{
-			// Don't cache Secrets — operator only reads/writes one specific Secret
-			// and doesn't need a cluster-wide list/watch permission.
-			ByObject: map[client.Object]cache.ByObject{
-				&corev1.Secret{}: {
-					Namespaces: map[string]cache.Config{
-						operatorNamespace: {},
-					},
-				},
-			},
-		},
+		Cache:                  cacheOpts,
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -229,6 +240,7 @@ func main() {
 		if err := mgr.Add(klinkwebhook.NewWebhookRunnable(
 			tlsMgr,
 			klinkwebhook.NewGateHandler(mgr.GetClient()),
+			klinkwebhook.NewWDValidatorHandler(mgr.GetClient()),
 			webhookAddr,
 		)); err != nil {
 			setupLog.Error(err, "Failed to set up gate webhook")

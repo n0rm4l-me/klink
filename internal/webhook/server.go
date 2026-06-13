@@ -29,13 +29,14 @@ import (
 // WebhookRunnable is a controller-runtime Runnable that starts the HTTPS
 // admission webhook server and the TLS rotation loop.
 type WebhookRunnable struct {
-	tlsMgr  *TLSManager
-	handler http.Handler
-	addr    string
+	tlsMgr      *TLSManager
+	gateHandler http.Handler
+	wdValidator http.Handler
+	addr        string
 }
 
-func NewWebhookRunnable(tlsMgr *TLSManager, handler http.Handler, addr string) *WebhookRunnable {
-	return &WebhookRunnable{tlsMgr: tlsMgr, handler: handler, addr: addr}
+func NewWebhookRunnable(tlsMgr *TLSManager, gateHandler http.Handler, wdValidator http.Handler, addr string) *WebhookRunnable {
+	return &WebhookRunnable{tlsMgr: tlsMgr, gateHandler: gateHandler, wdValidator: wdValidator, addr: addr}
 }
 
 func (w *WebhookRunnable) Start(ctx context.Context) error {
@@ -52,7 +53,8 @@ func (w *WebhookRunnable) Start(ctx context.Context) error {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/validate", w.handler)
+	mux.Handle("/validate", w.gateHandler)
+	mux.Handle("/validate-wd", w.wdValidator)
 	mux.HandleFunc("/healthz", func(rw http.ResponseWriter, _ *http.Request) {
 		rw.WriteHeader(http.StatusOK)
 	})

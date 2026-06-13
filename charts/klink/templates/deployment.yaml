@@ -39,6 +39,9 @@ spec:
             - --enable-gate-webhook
             - --gate-webhook-service=klink-webhook
             {{- end }}
+            {{- if .Values.watchNamespace }}
+            - --watch-namespace={{ .Values.watchNamespace }}
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

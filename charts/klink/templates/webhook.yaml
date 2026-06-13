@@ -58,4 +58,32 @@ webhooks:
         - key: kubernetes.io/metadata.name
           operator: NotIn
           values: ["kube-system", "klink-system"]
+---
+# ValidatingWebhook for WorkloadDependency resources — validates on CREATE/UPDATE.
+# failurePolicy: Fail ensures invalid WDs are rejected at admission time.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: klink-wd-validator
+  labels:
+    {{- include "klink.labels" . | nindent 4 }}
+webhooks:
+  - name: validate.workloaddependency.klink.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    rules:
+      - apiGroups: ["deps.klink.dev"]
+        apiVersions: ["v1alpha1"]
+        resources: ["workloaddependencies"]
+        operations: ["CREATE", "UPDATE"]
+        scope: Namespaced
+    clientConfig:
+      service:
+        name: klink-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /validate-wd
+        port: 443
+      caBundle: ""
 {{- end }}

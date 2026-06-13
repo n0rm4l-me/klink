@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- `--watch-namespace` flag for single-namespace mode (multi-tenancy)
+- `watchNamespace` value in Helm chart
+- `ValidatingWebhookConfiguration/klink-wd-validator` — validates WorkloadDependency on CREATE/UPDATE (failurePolicy: Fail)
+- WD validation: CronJob as dependency rejected, negative durations rejected, notify config validated
+- Release workflow (`.github/workflows/release.yml`): multi-arch image (amd64+arm64), GHCR push, Helm OCI chart, cosign signing, SBOM, GitHub Release
+- Notification webhook retry with exponential backoff (3 attempts: 1s, 2s, 4s)
+- `Released` phase — after `maxSuspendDuration` klink stays hands-off until dependency recovers
+
+### Fixed
+- `maxSuspendDuration` flapping loop — repeated suspend/restore cycle broken by `Released` phase
+- Status update conflict handled by requeue instead of error
+- `imagePullPolicy` defaults to `IfNotPresent` (was `Always`, blocked airgapped deployments)
+
 ## [0.2.0] - 2026-06-12
 
 ### Added

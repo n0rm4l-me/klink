@@ -27,7 +27,7 @@ rules:
 - apiGroups: ["admissionregistration.k8s.io"]
   resources: ["validatingwebhookconfigurations"]
   verbs: ["get", "patch"]
-  resourceNames: ["klink-gate"]
+  resourceNames: ["klink-gate", "klink-wd-validator"]
 {{- end }}
 - apiGroups: [""]
   resources: ["events"]
