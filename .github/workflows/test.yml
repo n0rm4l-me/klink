@@ -79,23 +79,10 @@ jobs:
           include_passed: true
           detailed_summary: true
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build image for scanning (no push)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64
-          push: false
-          load: true
-          tags: klink:scan
-          build-args: TARGETOS=linux
-
-      - name: Generate SBOM
+      - name: Generate SBOM from source (go.mod)
         uses: anchore/sbom-action@v0
         with:
-          image: klink:scan
+          path: .
           format: spdx-json
           output-file: sbom.spdx.json
           upload-artifact: true
