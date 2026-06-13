@@ -133,16 +133,20 @@ type WorkloadDependencySpec struct {
 	Notify *NotifySpec `json:"notify,omitempty"`
 }
 
-// +kubebuilder:validation:Enum=Healthy;Degraded;Suspended;Paused;Observed;Unknown
+// +kubebuilder:validation:Enum=Healthy;Degraded;Suspended;Released;Paused;Observed;Unknown
 type DependencyPhase string
 
 const (
 	PhaseHealthy   DependencyPhase = "Healthy"
 	PhaseDegraded  DependencyPhase = "Degraded"
 	PhaseSuspended DependencyPhase = "Suspended"
-	PhasePaused    DependencyPhase = "Paused"
-	PhaseObserved  DependencyPhase = "Observed" // observe mode: would have acted
-	PhaseUnknown   DependencyPhase = "Unknown"
+	// PhaseReleased means klink force-restored the workload after maxSuspendDuration
+	// while the dependency was still unhealthy. klink will not re-suspend until the
+	// dependency genuinely recovers, preventing a suspend/restore flapping loop.
+	PhaseReleased DependencyPhase = "Released"
+	PhasePaused   DependencyPhase = "Paused"
+	PhaseObserved DependencyPhase = "Observed" // observe mode: would have acted
+	PhaseUnknown  DependencyPhase = "Unknown"
 )
 
 // WorkloadDependencyStatus is the observed state of a WorkloadDependency.

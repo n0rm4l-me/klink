@@ -30,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -176,6 +175,18 @@ func (r *WorkloadDependencyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return r.setStatus(ctx, wd, depsv1alpha1.PhaseDegraded, unhealthyMsg, nil)
 	}
 
+	// Released: klink force-restored after maxSuspendDuration. Stay hands-off until
+	// the dependency genuinely recovers, then resume normal tracking.
+	if wd.Status.Phase == depsv1alpha1.PhaseReleased {
+		if allOk {
+			return r.handleHealthy(ctx, wd, dependent, now)
+		}
+		// Still unhealthy — do nothing, workload stays running (we gave up on suspending it)
+		return r.setStatus(ctx, wd, depsv1alpha1.PhaseReleased,
+			"force-restored after maxSuspendDuration; waiting for dependency to recover",
+			&ctrl.Result{RequeueAfter: 30 * time.Second})
+	}
+
 	// maxSuspendDuration: auto-restore if suspended too long, even if dependency still unhealthy.
 	if !allOk && wd.Status.Phase == depsv1alpha1.PhaseSuspended {
 		maxDur := wd.Spec.OnDegraded.MaxSuspendDuration.Duration
@@ -189,13 +200,14 @@ func (r *WorkloadDependencyReconciler) Reconcile(ctx context.Context, req ctrl.R
 				r.Recorder.Eventf(wd, corev1.EventTypeWarning, "MaxSuspendDurationExceeded",
 					"Restoring %s after %s (maxSuspendDuration exceeded) — dependency still unhealthy",
 					wd.Spec.Dependent.Name, maxDur)
-				// Force immediate restore bypassing recoveryWindow
 				if err := r.restoreWorkload(ctx, wd, dependent); err != nil {
 					return ctrl.Result{}, err
 				}
 				wd.Status.SavedReplicas = nil
 				wd.Status.HealthySince = nil
-				return r.setStatus(ctx, wd, depsv1alpha1.PhaseHealthy, "restored after maxSuspendDuration", nil)
+				// Enter Released phase — won't re-suspend until dependency truly recovers
+				return r.setStatus(ctx, wd, depsv1alpha1.PhaseReleased,
+					"force-restored after maxSuspendDuration; waiting for dependency to recover", nil)
 			}
 			// Requeue precisely when maxSuspendDuration expires
 			remaining := maxDur - elapsed
@@ -666,9 +678,11 @@ func (r *WorkloadDependencyReconciler) setStatus(
 	wd.Status.Message = msg
 	setCondition(wd, phase, msg)
 
-	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		return r.Status().Update(ctx, wd)
-	}); err != nil {
+	if err := r.Status().Update(ctx, wd); err != nil {
+		if errors.IsConflict(err) {
+			// Conflict is transient — requeue immediately and reconcile will re-read fresh state
+			return ctrl.Result{Requeue: true}, nil
+		}
 		recordReconcileError(wd.Namespace, "status_update")
 		return ctrl.Result{}, err
 	}

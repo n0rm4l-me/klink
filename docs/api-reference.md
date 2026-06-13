@@ -95,6 +95,8 @@ status:
 | `Healthy` | All dependencies healthy; dependent running normally |
 | `Degraded` | Dependency unhealthy; within hysteresis window, not yet acted |
 | `Suspended` | Dependent scaled to 0 (or CronJob suspended) |
+| `Released` | Force-restored after `maxSuspendDuration` expired while dependency was still unhealthy; klink will not re-suspend until the dependency genuinely recovers |
+| `Observed` | Observe mode — klink would have acted but took no action |
 | `Paused` | `klink.dev/paused=true` annotation set; no enforcement |
 | `Unknown` | Dependent workload not found |
 

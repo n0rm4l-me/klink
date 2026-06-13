@@ -243,6 +243,8 @@ staging      auth-needs-vault           Healthy                all dependencies 
 | `Healthy` | All dependencies healthy, workload running normally |
 | `Degraded` | Dependency unhealthy, within hysteresis window — no action yet |
 | `Suspended` | Dependent scaled to 0 (or CronJob suspended) |
+| `Released` | Force-restored after `maxSuspendDuration`; won't re-suspend until dependency recovers |
+| `Observed` | Observe mode — would have acted but took no action |
 | `Paused` | `klink.dev/paused=true` annotation set |
 | `Unknown` | Dependent workload not found |
 

@@ -951,12 +951,31 @@ var _ = Describe("WorkloadDependency controller", func() {
 			}, timeout, interval).Should(Equal(depsv1alpha1.PhaseSuspended))
 			Eventually(func() int32 { return getReplicas("bar", ns) }, timeout, interval).Should(Equal(int32(0)))
 
-			// After maxSuspendDuration (3s) — should become Healthy (force restored)
-			// Note: with soft mode and dep still unhealthy, klink will re-degrade after window
-			// We just verify the MaxSuspendDuration restore happened (Healthy phase reached)
+			// After maxSuspendDuration (3s) — workload force-restored, phase becomes Released
 			Eventually(func() depsv1alpha1.DependencyPhase {
 				return getPhase("wd", ns)
-			}, 25*time.Second, interval).Should(Equal(depsv1alpha1.PhaseHealthy))
+			}, 30*time.Second, interval).Should(Equal(depsv1alpha1.PhaseReleased))
+
+			// Replicas should be restored to original count
+			Eventually(func() int32 {
+				return getReplicas("bar", ns)
+			}, 15*time.Second, interval).Should(Equal(int32(2)))
+
+			// Released is stable — klink does NOT re-suspend while dependency stays unhealthy
+			Consistently(func() int32 {
+				return getReplicas("bar", ns)
+			}, 8*time.Second, interval).Should(Equal(int32(2)))
+
+			// When dependency recovers, phase returns to Healthy
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "foo", Namespace: ns}, dep)).To(Succeed())
+			two := int32(2)
+			dep.Spec.Replicas = &two
+			Expect(k8sClient.Update(ctx, dep)).To(Succeed())
+			setReady(dep, 2)
+
+			Eventually(func() depsv1alpha1.DependencyPhase {
+				return getPhase("wd", ns)
+			}, 30*time.Second, interval).Should(Equal(depsv1alpha1.PhaseHealthy))
 		})
 	})
 

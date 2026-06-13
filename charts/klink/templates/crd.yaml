@@ -129,6 +129,7 @@ spec:
                       - Healthy
                       - Degraded
                       - Suspended
+                      - Released
                       - Paused
                       - Observed
                       - Unknown
@@ -253,6 +254,7 @@ spec:
                 - Healthy
                 - Degraded
                 - Suspended
+                - Released
                 - Paused
                 - Observed
                 - Unknown
