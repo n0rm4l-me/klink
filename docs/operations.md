@@ -131,6 +131,57 @@ GKE Autopilot does not invoke ValidatingAdmissionWebhooks for `apps/v1` Deployme
 - kind/minikube/k3d
 - kubeadm clusters
 
+## Multi-Tenancy (Single-Namespace Mode)
+
+To restrict the operator to a single namespace — useful when multiple teams share a cluster:
+
+```yaml
+# values.yaml
+watchNamespace: "my-team-namespace"
+```
+
+Or via flag:
+```bash
+helm upgrade klink ./charts/klink --namespace klink-system \
+  --set watchNamespace=my-team-namespace
+```
+
+In single-namespace mode the operator only watches and manages WorkloadDependencies in that namespace. RBAC should be tightened accordingly.
+
+## WD Validation Webhook
+
+When `gateWebhook.enabled=true`, klink also installs a `ValidatingWebhookConfiguration/klink-wd-validator` that validates WorkloadDependency resources on CREATE and UPDATE with `failurePolicy: Fail`.
+
+**What it validates:**
+- `spec.dependent.kind` and `spec.dependent.name` are required
+- `spec.dependsOn` must not be empty
+- `CronJob` cannot be used as a dependency (no replicas to check)
+- `spec.onDegraded.maxSuspendDuration` must be positive if set
+- `spec.notify` must have either `webhook` or `webhookSecretRef`, not both
+
+**Example rejection:**
+```
+Error from server: error when creating "wd.yaml":
+  admission webhook "validate.workloaddependency.klink.dev" denied the request:
+  validation failed: CronJob cannot be used as a dependency
+```
+
+## SBOM and Security
+
+klink CI generates a Software Bill of Materials (SBOM) in SPDX JSON format for every commit and scans it for known CVEs. Critical vulnerabilities fail the build.
+
+Every GitHub Release includes:
+- `sbom.spdx.json` — full dependency inventory
+- Cosign signature for the container image
+- Verification instructions in the release notes
+
+**Verify an image:**
+```bash
+cosign verify ghcr.io/n0rm4l-me/klink:v0.3.0 \
+  --certificate-identity-regexp='https://github.com/n0rm4l-me/klink' \
+  --certificate-oidc-issuer='https://token.actions.githubusercontent.com'
+```
+
 ## Resource Requirements
 
 Default resource limits:

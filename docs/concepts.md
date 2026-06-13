@@ -51,21 +51,18 @@ action:                           scale to 0                  restore replicas
 ```
 
 ```mermaid
-gantt
+timeline
     title Dependency failure → scale-to-zero → recovery
-    dateFormat  s
-    axisFormat  %Ss
-
-    section dependency health
-    Healthy           : 0, 10s
-    Unhealthy         : 10s, 50s
-    Healthy again     : 60s, 120s
-
-    section klink action
-    Watching (Degraded) : crit, 10s, 40s
-    Scale to zero        : milestone, 40s, 0
-    Waiting (Suspended) : 60s, 120s
-    Restore replicas    : milestone, 120s, 0
+    section t=0s
+        Dependency healthy : klink phase: Healthy
+    section t=10s
+        Dependency fails : klink phase: Degraded (window starts)
+    section t=40s
+        Window expires : klink scales dependent to 0 : klink phase: Suspended
+    section t=60s
+        Dependency recovers : klink phase: Suspended (recoveryWindow starts)
+    section t=120s
+        recoveryWindow expires : klink restores replicas : klink phase: Healthy
 ```
 
 ## Enforcement Modes

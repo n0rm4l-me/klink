@@ -26,9 +26,17 @@ spec:
         recoveryWindow: duration  # default "60s"
 
   onDegraded:
-    action: ScaleToZero   # only supported action
+    action: ScaleToZero           # only supported action
+    maxSuspendDuration: duration  # optional; auto-restore after this time (e.g. "4h")
 
-  mode: strict | soft | gate  # default "strict"
+  mode: strict | soft | gate | observe  # default "strict"
+
+  notify:                         # optional; send webhook on phase transitions
+    webhook: string               # URL to POST to (mutually exclusive with webhookSecretRef)
+    webhookSecretRef:
+      name: string                # Secret name
+      key: string                 # Secret key containing URL (default: "url")
+    onPhases: []                  # phases that trigger notification (default: [Suspended, Healthy])
 ```
 
 ### Spec Fields
@@ -71,21 +79,51 @@ For `Rollout` as dependency: `minReadyPercent` is not used. Health is determined
 | `strict` | Scales to 0 on failure. Re-enforces scale-to-zero every 15s while unhealthy. |
 | `soft` | Scales to 0 once. Does not revert manual scale-ups. |
 | `gate` | Does not scale to 0. Blocks scale-up via admission webhook while unhealthy. |
+| `observe` | Logs what klink would do but takes **no action**. Use for safe onboarding. Phase becomes `Observed`. |
 
-#### `spec.onDegraded.action`
+#### `spec.onDegraded`
 
-Currently only `ScaleToZero` is supported.
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `action` | string | `ScaleToZero` | Action to take. Currently only `ScaleToZero`. |
+| `maxSuspendDuration` | duration | `""` (disabled) | Auto-restore workload after this time even if dependency still unhealthy. Prevents indefinite suspension. E.g. `"4h"`. After restore phase becomes `Released`. |
+
+#### `spec.notify`
+
+Optional. Sends an HTTP POST to a webhook URL on phase transitions.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `webhook` | string | Webhook URL. Mutually exclusive with `webhookSecretRef`. |
+| `webhookSecretRef.name` | string | Secret containing the URL. |
+| `webhookSecretRef.key` | string | Secret key. Default: `"url"`. |
+| `onPhases` | string[] | Phases that trigger notification. Default: `["Suspended", "Healthy"]`. |
+
+Payload sent on each notification:
+```json
+{
+  "workloadDependency": "payments-needs-database",
+  "namespace": "production",
+  "phase": "Suspended",
+  "previousPhase": "Degraded",
+  "dependent": "payments-service",
+  "dependentKind": "Rollout",
+  "message": "dependency postgresql not healthy",
+  "timestamp": "2026-06-12T10:00:00Z"
+}
+```
 
 ### Status
 
 ```yaml
 status:
-  phase: Healthy | Degraded | Suspended | Paused | Unknown
+  phase: Healthy | Degraded | Suspended | Released | Observed | Paused | Unknown
   savedReplicas: integer   # replica count saved before scale-to-zero
   degradedSince: time      # when dependency first became unhealthy
+  suspendedAt: time        # when workload was suspended (used for maxSuspendDuration)
   healthySince: time       # when dependency first recovered (for recoveryWindow)
   message: string          # human-readable description
-  conditions: []           # standard metav1.Condition array (reserved)
+  conditions: []           # standard metav1.Condition array
 ```
 
 #### `status.phase`

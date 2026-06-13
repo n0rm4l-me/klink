@@ -25,7 +25,8 @@ git clone https://github.com/n0rm4l-me/klink
 cd klink
 helm upgrade --install klink ./charts/klink \
   --namespace klink-system \
-  --create-namespace
+  --create-namespace \
+  --set image.tag=0.2.0
 ```
 
 Verify the operator is running:
