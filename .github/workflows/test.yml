@@ -6,10 +6,14 @@ on:
 
 permissions: {}
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   test:
     permissions:
       contents: read
+      checks: write
     name: Build, vet and test
     runs-on: ubuntu-latest
     steps:
@@ -21,6 +25,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@latest
 
       - name: Build
         run: go build ./...
@@ -37,7 +44,11 @@ jobs:
             (echo "CRD manifests are out of date. Run 'make manifests' and commit." && exit 1)
 
       - name: Run unit tests (webhook)
-        run: go test ./internal/webhook/... -timeout 60s
+        run: |
+          gotestsum \
+            --format github-actions \
+            --junitfile /tmp/unit-junit.xml \
+            -- ./internal/webhook/... -timeout 60s
 
       - name: Cache envtest binaries
         uses: actions/cache@v4
@@ -53,4 +64,16 @@ jobs:
       - name: Run integration tests (envtest)
         run: |
           ENVTEST_ASSETS=$(setup-envtest use 1.33 -p path)
-          KUBEBUILDER_ASSETS=$ENVTEST_ASSETS go test ./internal/controller/... -timeout 300s
+          KUBEBUILDER_ASSETS=$ENVTEST_ASSETS gotestsum \
+            --format github-actions \
+            --junitfile /tmp/integration-junit.xml \
+            -- ./internal/controller/... -timeout 300s
+
+      - name: Publish test results
+        uses: mikepenz/action-junit-report@v5
+        if: always()
+        with:
+          report_paths: '/tmp/*-junit.xml'
+          check_name: Test Results
+          include_passed: true
+          detailed_summary: true
