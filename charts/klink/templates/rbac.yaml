@@ -23,7 +23,7 @@ rules:
 - apiGroups: ["argoproj.io"]
   resources: ["rollouts"]
   verbs: ["get", "list", "watch", "update", "patch"]
-{{- if .Values.gateWebhook.enabled }}
+{{- if or .Values.gateWebhook.enabled .Values.wdValidation.enabled }}
 # get-only in ClusterRole — patch is in a separate namespaced Role below to
 # limit the blast radius if the manager pod is compromised (C-5 fix).
 - apiGroups: ["admissionregistration.k8s.io"]
@@ -39,7 +39,7 @@ rules:
   resources: ["leases"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 {{- end }}
-{{- if .Values.gateWebhook.enabled }}
+{{- if or .Values.gateWebhook.enabled .Values.wdValidation.enabled }}
 ---
 # Namespaced Role for TLS secret — more restrictive than ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1

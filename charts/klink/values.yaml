@@ -28,7 +28,13 @@ leaderElection:
 watchNamespace: ""
 
 gateWebhook:
-  enabled: false   # set to true to enable gate mode admission webhook
+  enabled: false   # set to true to enable gate mode admission webhook (blocks scale-up)
+
+# wdValidation enables the ValidatingWebhook for WorkloadDependency resources.
+# Recommended: enabled by default — validates WD on CREATE/UPDATE regardless of
+# gate mode. Requires the webhook server (shares port 9443 with gateWebhook).
+wdValidation:
+  enabled: true
 
 metrics:
   enabled: true

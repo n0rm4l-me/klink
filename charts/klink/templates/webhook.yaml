@@ -1,4 +1,5 @@
-{{- if .Values.gateWebhook.enabled }}
+{{- $webhookEnabled := or .Values.gateWebhook.enabled .Values.wdValidation.enabled }}
+{{- if $webhookEnabled }}
 ---
 apiVersion: v1
 kind: Service
@@ -14,7 +15,13 @@ spec:
     - name: webhook
       port: 443
       targetPort: 9443
+{{- end }}
+
+{{- if .Values.gateWebhook.enabled }}
 ---
+# Gate webhook — blocks scale-up of workloads when dependencies are unhealthy.
+# failurePolicy: Ignore — never block workloads if webhook is down.
+# NOTE: Not supported on GKE Autopilot (platform limitation). Use strict mode instead.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
@@ -27,7 +34,7 @@ webhooks:
   - name: gate.klink.dev
     admissionReviewVersions: ["v1"]
     sideEffects: None
-    failurePolicy: Ignore  # fail open — never block if webhook is down
+    failurePolicy: Ignore  # fail open — never block workloads if webhook is down
     matchPolicy: Equivalent
     rules:
       - apiGroups: ["apps"]
@@ -58,9 +65,14 @@ webhooks:
         - key: kubernetes.io/metadata.name
           operator: NotIn
           values: ["kube-system", "klink-system"]
+{{- end }}
+
+{{- if .Values.wdValidation.enabled }}
 ---
-# ValidatingWebhook for WorkloadDependency resources — validates on CREATE/UPDATE.
+# WorkloadDependency validator — validates WD resources on CREATE/UPDATE.
+# Enabled independently of gate mode. Recommended: always on.
 # failurePolicy: Fail ensures invalid WDs are rejected at admission time.
+# timeoutSeconds: 10 — default k8s webhook timeout is sufficient.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
@@ -73,6 +85,7 @@ webhooks:
     sideEffects: None
     failurePolicy: Fail
     matchPolicy: Equivalent
+    timeoutSeconds: 10
     rules:
       - apiGroups: ["deps.klink.dev"]
         apiVersions: ["v1alpha1"]
@@ -85,5 +98,6 @@ webhooks:
         namespace: {{ .Release.Namespace }}
         path: /validate-wd
         port: 443
+      # caBundle is patched automatically by the operator at startup
       caBundle: ""
 {{- end }}

@@ -35,7 +35,7 @@ spec:
             {{- if .Values.leaderElection.enabled }}
             - --leader-elect
             {{- end }}
-            {{- if .Values.gateWebhook.enabled }}
+            {{- if or .Values.gateWebhook.enabled .Values.wdValidation.enabled }}
             - --enable-gate-webhook
             - --gate-webhook-service=klink-webhook
             {{- end }}
@@ -54,7 +54,7 @@ spec:
               containerPort: {{ .Values.metrics.port }}
               protocol: TCP
             {{- end }}
-            {{- if .Values.gateWebhook.enabled }}
+            {{- if or .Values.gateWebhook.enabled .Values.wdValidation.enabled }}
             - name: webhook
               containerPort: 9443
               protocol: TCP
