@@ -21,10 +21,32 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// certHolder holds the current TLS certificate and allows atomic replacement.
+// This is the fix for C-4: Go's tls.Config.Certificates[] is read once at
+// server start; using GetCertificate with a mutex-protected holder lets the
+// rotation loop update the cert in-place without restarting the server.
+type certHolder struct {
+	mu   sync.RWMutex
+	cert *tls.Certificate
+}
+
+func (h *certHolder) get() *tls.Certificate {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.cert
+}
+
+func (h *certHolder) set(cert tls.Certificate) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cert = &cert
+}
 
 // WebhookRunnable is a controller-runtime Runnable that starts the HTTPS
 // admission webhook server and the TLS rotation loop.
@@ -52,6 +74,9 @@ func (w *WebhookRunnable) Start(ctx context.Context) error {
 		return fmt.Errorf("load webhook keypair: %w", err)
 	}
 
+	holder := &certHolder{}
+	holder.set(cert)
+
 	mux := http.NewServeMux()
 	mux.Handle("/validate", w.gateHandler)
 	mux.Handle("/validate-wd", w.wdValidator)
@@ -63,16 +88,21 @@ func (w *WebhookRunnable) Start(ctx context.Context) error {
 		Addr:    w.addr,
 		Handler: mux,
 		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS13,
+			MinVersion: tls.VersionTLS13,
+			// GetCertificate is called per-handshake and reads from the holder,
+			// allowing the rotation loop to update the cert without a server restart.
+			GetCertificate: func(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				return holder.get(), nil
+			},
 		},
 	}
 
-	go w.tlsMgr.StartRotationLoop(ctx)
+	// Start the rotation loop. It calls EnsureCert which updates the Secret
+	// and patches caBundle. We also hook it to update our in-memory holder.
+	go w.runRotationLoop(ctx, holder)
 
 	go func() {
 		<-ctx.Done()
-		// Use a timeout for graceful shutdown so pod termination doesn't hang
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
@@ -83,4 +113,32 @@ func (w *WebhookRunnable) Start(ctx context.Context) error {
 		return fmt.Errorf("webhook server: %w", err)
 	}
 	return nil
+}
+
+// runRotationLoop extends the TLSManager rotation loop to also update the
+// in-memory cert holder so the running TLS server picks up the new cert.
+func (w *WebhookRunnable) runRotationLoop(ctx context.Context, holder *certHolder) {
+	log := logf.FromContext(ctx)
+	ticker := time.NewTicker(12 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			certPEM, keyPEM, err := w.tlsMgr.EnsureCert(ctx)
+			if err != nil {
+				log.Error(err, "cert rotation failed")
+				continue
+			}
+			cert, err := tls.X509KeyPair(certPEM, keyPEM)
+			if err != nil {
+				log.Error(err, "failed to load rotated keypair")
+				continue
+			}
+			holder.set(cert)
+			log.Info("webhook TLS cert rotated and loaded into server")
+		}
+	}
 }

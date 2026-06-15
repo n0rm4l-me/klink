@@ -24,9 +24,11 @@ rules:
   resources: ["rollouts"]
   verbs: ["get", "list", "watch", "update", "patch"]
 {{- if .Values.gateWebhook.enabled }}
+# get-only in ClusterRole — patch is in a separate namespaced Role below to
+# limit the blast radius if the manager pod is compromised (C-5 fix).
 - apiGroups: ["admissionregistration.k8s.io"]
   resources: ["validatingwebhookconfigurations"]
-  verbs: ["get", "patch"]
+  verbs: ["get"]
   resourceNames: ["klink-gate", "klink-wd-validator"]
 {{- end }}
 - apiGroups: [""]
@@ -55,6 +57,14 @@ rules:
 - apiGroups: [""]
   resources: ["secrets"]
   verbs: ["create"]
+# patch on ValidatingWebhookConfigurations is kept here in a namespaced Role
+# rather than in the ClusterRole — the manager only needs to patch caBundle on
+# these two specific objects. Keeping it out of ClusterRole means a compromised
+# pod cannot rewrite arbitrary webhook configs cluster-wide (C-5 fix).
+- apiGroups: ["admissionregistration.k8s.io"]
+  resources: ["validatingwebhookconfigurations"]
+  verbs: ["patch"]
+  resourceNames: ["klink-gate", "klink-wd-validator"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

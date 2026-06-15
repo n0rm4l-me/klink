@@ -233,7 +233,16 @@ func (r *WorkloadDependencyReconciler) handleDeletion(ctx context.Context, wd *d
 			dependentNS = wd.Namespace
 		}
 		dependent, err := r.getWorkload(ctx, wd.Spec.Dependent.Kind, wd.Spec.Dependent.Name, dependentNS)
-		if err == nil {
+		if err != nil {
+			if !errors.IsNotFound(err) {
+				// Transient API error — retry so we don't remove the finalizer
+				// without restoring replicas. NotFound is acceptable (workload
+				// already deleted), anything else we must retry.
+				log.Error(err, "failed to get dependent workload for restore on deletion, retrying")
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			}
+			// Workload not found — nothing to restore, proceed with finalizer removal.
+		} else {
 			if restoreErr := r.restoreWorkload(ctx, wd, dependent); restoreErr != nil {
 				log.Error(restoreErr, "failed to restore replicas on deletion, retrying")
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -662,29 +671,65 @@ func (r *WorkloadDependencyReconciler) setStatus(
 	msg string,
 	result *ctrl.Result,
 ) (ctrl.Result, error) {
+	// Snapshot the fields we intend to write so we can re-apply them after a
+	// conflict re-read.  A 409 Conflict means another reconcile loop updated
+	// the server object; we must re-read to get the latest resourceVersion and
+	// then re-apply our changes, otherwise critical fields (SavedReplicas,
+	// DegradedSince, SuspendedAt) are silently lost and workloads can get stuck
+	// at 0 replicas with no automated recovery.
+	savedReplicas := wd.Status.SavedReplicas
+	degradedSince := wd.Status.DegradedSince
+	healthySince := wd.Status.HealthySince
+
 	prevPhase := wd.Status.Phase
 
-	// Track when suspension started for maxSuspendDuration
-	if phase == depsv1alpha1.PhaseSuspended {
-		if wd.Status.SuspendedAt == nil {
-			now := metav1.Now()
-			wd.Status.SuspendedAt = &now
+	applyFields := func() {
+		if phase == depsv1alpha1.PhaseSuspended {
+			if wd.Status.SuspendedAt == nil {
+				now := metav1.Now()
+				wd.Status.SuspendedAt = &now
+			}
+		} else {
+			wd.Status.SuspendedAt = nil
 		}
-	} else {
-		wd.Status.SuspendedAt = nil
+		wd.Status.Phase = phase
+		wd.Status.Message = msg
+		// Restore the fields that were set by the caller before invoking setStatus.
+		// On a re-read these come back as nil/zero from the server.
+		if savedReplicas != nil {
+			wd.Status.SavedReplicas = savedReplicas
+		}
+		if degradedSince != nil {
+			wd.Status.DegradedSince = degradedSince
+		}
+		if healthySince != nil {
+			wd.Status.HealthySince = healthySince
+		}
+		setCondition(wd, phase, msg)
 	}
 
-	wd.Status.Phase = phase
-	wd.Status.Message = msg
-	setCondition(wd, phase, msg)
+	applyFields()
 
-	if err := r.Status().Update(ctx, wd); err != nil {
-		if errors.IsConflict(err) {
-			// Conflict is transient — requeue immediately and reconcile will re-read fresh state
-			return ctrl.Result{Requeue: true}, nil
+	const maxRetries = 3
+	var updateErr error
+	for i := 0; i < maxRetries; i++ {
+		updateErr = r.Status().Update(ctx, wd)
+		if updateErr == nil {
+			break
 		}
-		recordReconcileError(wd.Namespace, "status_update")
-		return ctrl.Result{}, err
+		if !errors.IsConflict(updateErr) {
+			recordReconcileError(wd.Namespace, "status_update")
+			return ctrl.Result{}, updateErr
+		}
+		// Re-read the latest version and re-apply our desired fields.
+		if getErr := r.Get(ctx, types.NamespacedName{Name: wd.Name, Namespace: wd.Namespace}, wd); getErr != nil {
+			return ctrl.Result{}, getErr
+		}
+		applyFields()
+	}
+	if updateErr != nil {
+		// Exhausted retries — requeue so the next reconcile starts fresh.
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	recordPhase(wd.Namespace, wd.Name, string(phase))

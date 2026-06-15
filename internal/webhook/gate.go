@@ -94,6 +94,13 @@ func (h *GateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *GateHandler) validate(ctx context.Context, req *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse {
 	log := logf.FromContext(ctx)
 
+	// Gate mode only applies to scale-up on existing workloads.
+	// On CREATE, OldObject is nil — allow unconditionally so we don't block
+	// initial workload creation.
+	if req.Operation == admissionv1.Create {
+		return allow()
+	}
+
 	// Only care about scale-up (replicas increasing or CronJob unsuspend)
 	newReplicas, err := extractReplicas(req.Object.Raw, req.Kind.Kind)
 	if err != nil {
