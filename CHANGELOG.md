@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-15
+
 ### Added
 - `--watch-namespace` flag for single-namespace mode (multi-tenancy)
 - `watchNamespace` value in Helm chart
@@ -69,5 +71,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - 18 integration tests via envtest
 - GitHub Actions CI
 
-[Unreleased]: https://github.com/n0rm4l-me/klink/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/n0rm4l-me/klink/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/n0rm4l-me/klink/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/n0rm4l-me/klink/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/n0rm4l-me/klink/releases/tag/v0.1.0

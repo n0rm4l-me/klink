@@ -26,7 +26,7 @@ cd klink
 helm upgrade --install klink ./charts/klink \
   --namespace klink-system \
   --create-namespace \
-  --set image.tag=0.2.0
+  --set image.tag=0.3.0
 ```
 
 Verify the operator is running:
