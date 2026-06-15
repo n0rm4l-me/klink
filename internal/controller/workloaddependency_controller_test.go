@@ -1087,4 +1087,114 @@ var _ = Describe("WorkloadDependency controller", func() {
 			}, timeout, interval).Should(Equal(depsv1alpha1.PhaseUnknown))
 		})
 	})
+
+	Describe("Indexed watch — findWDsForWorkload", func() {
+		// These tests verify that changing a dependency or dependent triggers
+		// reconciliation via the field indexes, not a cluster-wide List scan.
+
+		It("reconciles when a dependsOn workload changes", func() {
+			// Create dependency and dependent
+			dep := makeDeployment("foo", ns, 2)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			setReady(dep, 2)
+
+			svc := makeDeployment("bar", ns, 2)
+			Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+			setReady(svc, 2)
+
+			wd := makeWD("wd", ns, "bar", []string{"foo"}, depsv1alpha1.ModeSoft, shortWindow, shortRecovery)
+			Expect(k8sClient.Create(ctx, wd)).To(Succeed())
+
+			Eventually(func() depsv1alpha1.DependencyPhase {
+				return getPhase("wd", ns)
+			}, timeout, interval).Should(Equal(depsv1alpha1.PhaseHealthy))
+
+			// Scale dependency to 0 — the watch on Deployment should trigger
+			// reconciliation via the dependsOn index
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "foo", Namespace: ns}, dep)).To(Succeed())
+			zero := int32(0)
+			dep.Spec.Replicas = &zero
+			Expect(k8sClient.Update(ctx, dep)).To(Succeed())
+			setReady(dep, 0)
+
+			// Reconcile should be triggered and phase should move to Degraded/Suspended
+			Eventually(func() depsv1alpha1.DependencyPhase {
+				return getPhase("wd", ns)
+			}, timeout, interval).ShouldNot(Equal(depsv1alpha1.PhaseHealthy))
+		})
+
+		It("reconciles when the dependent workload changes (strict re-enforcement)", func() {
+			dep := makeDeployment("foo", ns, 2)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			setReady(dep, 2)
+
+			svc := makeDeployment("bar", ns, 2)
+			Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+			setReady(svc, 2)
+
+			wd := makeWD("wd", ns, "bar", []string{"foo"}, depsv1alpha1.ModeStrict, shortWindow, shortRecovery)
+			Expect(k8sClient.Create(ctx, wd)).To(Succeed())
+
+			Eventually(func() depsv1alpha1.DependencyPhase {
+				return getPhase("wd", ns)
+			}, timeout, interval).Should(Equal(depsv1alpha1.PhaseHealthy))
+
+			// Kill dependency and wait for suspension
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "foo", Namespace: ns}, dep)).To(Succeed())
+			zero := int32(0)
+			dep.Spec.Replicas = &zero
+			Expect(k8sClient.Update(ctx, dep)).To(Succeed())
+			setReady(dep, 0)
+
+			Eventually(func() depsv1alpha1.DependencyPhase {
+				return getPhase("wd", ns)
+			}, timeout, interval).Should(Equal(depsv1alpha1.PhaseSuspended))
+			Eventually(func() int32 { return getReplicas("bar", ns) }, timeout, interval).Should(Equal(int32(0)))
+
+			// Manually scale up bar — watch on Deployment (dependent) should trigger
+			// strict re-enforcement via the dependent index
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "bar", Namespace: ns}, svc)).To(Succeed())
+			five := int32(5)
+			svc.Spec.Replicas = &five
+			Expect(k8sClient.Update(ctx, svc)).To(Succeed())
+
+			// Strict mode should revert back to 0 via the dependent watch
+			Eventually(func() int32 {
+				return getReplicas("bar", ns)
+			}, 30*time.Second, interval).Should(Equal(int32(0)))
+		})
+
+		It("does not trigger reconcile for unrelated workload changes", func() {
+			dep := makeDeployment("foo", ns, 2)
+			Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+			setReady(dep, 2)
+
+			svc := makeDeployment("bar", ns, 2)
+			Expect(k8sClient.Create(ctx, svc)).To(Succeed())
+			setReady(svc, 2)
+
+			// Unrelated deployment — not referenced by any WD
+			unrelated := makeDeployment("unrelated", ns, 1)
+			Expect(k8sClient.Create(ctx, unrelated)).To(Succeed())
+			setReady(unrelated, 1)
+
+			wd := makeWD("wd", ns, "bar", []string{"foo"}, depsv1alpha1.ModeSoft, shortWindow, shortRecovery)
+			Expect(k8sClient.Create(ctx, wd)).To(Succeed())
+
+			Eventually(func() depsv1alpha1.DependencyPhase {
+				return getPhase("wd", ns)
+			}, timeout, interval).Should(Equal(depsv1alpha1.PhaseHealthy))
+
+			// Change unrelated deployment
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "unrelated", Namespace: ns}, unrelated)).To(Succeed())
+			three := int32(3)
+			unrelated.Spec.Replicas = &three
+			Expect(k8sClient.Update(ctx, unrelated)).To(Succeed())
+
+			// WD should remain Healthy — unrelated change doesn't affect it
+			Consistently(func() depsv1alpha1.DependencyPhase {
+				return getPhase("wd", ns)
+			}, 5*time.Second, interval).Should(Equal(depsv1alpha1.PhaseHealthy))
+		})
+	})
 })

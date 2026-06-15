@@ -824,10 +824,13 @@ func recoveryWindow(wd *depsv1alpha1.WorkloadDependency) time.Duration {
 // indexDependentName is the field index key for WD.spec.dependent.name + namespace.
 const indexDependentName = ".spec.dependent.namespacedName"
 
+// indexDependsOnName is the field index key for WD.spec.dependsOn[*] name+namespace.
+// A single WD can have multiple dependsOn entries so this index returns multiple values.
+const indexDependsOnName = ".spec.dependsOn.namespacedNames"
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *WorkloadDependencyReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// Index WorkloadDependency by dependent workload name+namespace for efficient
-	// isSuspendedByKlink lookups — replaces cluster-wide List() O(n) scan.
+	// Index by spec.dependent — used by isSuspendedByKlink (O(1) lookup).
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
 		&depsv1alpha1.WorkloadDependency{},
@@ -844,6 +847,28 @@ func (r *WorkloadDependencyReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		return fmt.Errorf("register field index %s: %w", indexDependentName, err)
 	}
 
+	// Index by spec.dependsOn[*] — used by findWDsForWorkload to avoid
+	// cluster-wide List() when a watched workload changes.
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&depsv1alpha1.WorkloadDependency{},
+		indexDependsOnName,
+		func(obj client.Object) []string {
+			wd := obj.(*depsv1alpha1.WorkloadDependency)
+			keys := make([]string, 0, len(wd.Spec.DependsOn))
+			for _, dep := range wd.Spec.DependsOn {
+				ns := dep.Namespace
+				if ns == "" {
+					ns = wd.Namespace
+				}
+				keys = append(keys, ns+"/"+dep.Name)
+			}
+			return keys
+		},
+	); err != nil {
+		return fmt.Errorf("register field index %s: %w", indexDependsOnName, err)
+	}
+
 	rolloutObj := &unstructured.Unstructured{}
 	rolloutObj.SetGroupVersionKind(rolloutGVK)
 
@@ -857,42 +882,42 @@ func (r *WorkloadDependencyReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Complete(r)
 }
 
+// findWDsForWorkload maps a changed workload to all WorkloadDependency objects
+// that reference it — either as a dependency (dependsOn) or as the dependent
+// itself (for strict mode re-enforcement).
+//
+// Uses two field indexes (indexDependsOnName, indexDependentName) for O(1)
+// lookups instead of a cluster-wide List() O(n) scan. This matters because
+// this function is called on every Deployment/StatefulSet/CronJob/Rollout
+// change in the cluster.
 func (r *WorkloadDependencyReconciler) findWDsForWorkload(ctx context.Context, obj client.Object) []ctrl.Request {
-	wdList := &depsv1alpha1.WorkloadDependencyList{}
-	if err := r.List(ctx, wdList); err != nil {
-		return nil
-	}
-
+	key := obj.GetNamespace() + "/" + obj.GetName()
 	seen := map[types.NamespacedName]bool{}
 	var requests []ctrl.Request
 
 	enqueue := func(wd depsv1alpha1.WorkloadDependency) {
-		key := types.NamespacedName{Name: wd.Name, Namespace: wd.Namespace}
-		if !seen[key] {
-			seen[key] = true
-			requests = append(requests, ctrl.Request{NamespacedName: key})
+		k := types.NamespacedName{Name: wd.Name, Namespace: wd.Namespace}
+		if !seen[k] {
+			seen[k] = true
+			requests = append(requests, ctrl.Request{NamespacedName: k})
 		}
 	}
 
-	for _, wd := range wdList.Items {
-		for _, dep := range wd.Spec.DependsOn {
-			ns := dep.Namespace
-			if ns == "" {
-				ns = wd.Namespace
-			}
-			if dep.Name == obj.GetName() && ns == obj.GetNamespace() {
-				enqueue(wd)
-				break
-			}
-		}
-
-		depNS := wd.Spec.Dependent.Namespace
-		if depNS == "" {
-			depNS = wd.Namespace
-		}
-		if wd.Spec.Dependent.Name == obj.GetName() && depNS == obj.GetNamespace() {
+	// 1. WDs that list this workload in spec.dependsOn
+	depOnList := &depsv1alpha1.WorkloadDependencyList{}
+	if err := r.List(ctx, depOnList, client.MatchingFields{indexDependsOnName: key}); err == nil {
+		for _, wd := range depOnList.Items {
 			enqueue(wd)
 		}
 	}
+
+	// 2. WDs whose spec.dependent IS this workload (strict re-enforcement)
+	dependentList := &depsv1alpha1.WorkloadDependencyList{}
+	if err := r.List(ctx, dependentList, client.MatchingFields{indexDependentName: key}); err == nil {
+		for _, wd := range dependentList.Items {
+			enqueue(wd)
+		}
+	}
+
 	return requests
 }
